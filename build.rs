@@ -11,6 +11,13 @@ fn main() {
     let rgba_256 = rasterize(&svg, 256);
     save_png(&out.join("ravnpad-icon.png"), 256, &rgba_256);
     write_ico(&svg, &out.join("ravnpad.ico"));
+    let icns_path = out.join("ravnpad.icns");
+    write_icns(&svg, &icns_path);
+    // `OUT_DIR` is `target/{profile}/build/{pkg}-{hash}/out`. Copy next to the
+    // binary so the macOS packaging step can pick it up without hashing.
+    if let Some(profile_dir) = out.ancestors().nth(3) {
+        let _ = fs::copy(&icns_path, profile_dir.join("ravnpad.icns"));
+    }
 
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {
         let mut res = winresource::WindowsResource::new();
@@ -62,6 +69,20 @@ fn save_png(path: &Path, size: u32, rgba: &[u8]) {
         .expect("png-buffer")
         .save(path)
         .expect("kunne ikke lagre png-ikon");
+}
+
+fn write_icns(svg: &[u8], path: &Path) {
+    let mut family = icns::IconFamily::new();
+    for size in [16, 32, 48, 128, 256, 512, 1024] {
+        let rgba = rasterize(svg, size);
+        let image = icns::Image::from_data(icns::PixelFormat::RGBA, size, size, rgba)
+            .unwrap_or_else(|err| panic!("icns {size}x{size}: {err}"));
+        family
+            .add_icon(&image)
+            .unwrap_or_else(|err| panic!("icns {size}x{size}: {err}"));
+    }
+    let file = fs::File::create(path).expect("icns-fil");
+    family.write(file).expect("kunne ikke skrive icns");
 }
 
 fn write_ico(svg: &[u8], path: &Path) {

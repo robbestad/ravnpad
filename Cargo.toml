@@ -1,6 +1,6 @@
 [package]
 name = "ravnpad"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2024"
 rust-version = "1.88"
 description = "A simple UTF-8 notepad"
@@ -15,6 +15,9 @@ categories = ["gui", "text-editors"]
 [dependencies]
 eframe = "0.33"
 egui-file-dialog = "0.12"
+serde_json = "1"
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
@@ -23,6 +26,7 @@ winreg = "0.55"
 winit = { version = "0.30", default-features = false, features = ["x11"] }
 
 [build-dependencies]
+icns = "0.3"
 ico = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 resvg = "0.45"
