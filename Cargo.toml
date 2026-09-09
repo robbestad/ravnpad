@@ -1,0 +1,15 @@
+[package]
+name = "textpad"
+version = "0.1.0"
+edition = "2024"
+description = "Enkel les/skriv-notisblokk"
+license = "MIT"
+
+[dependencies]
+eframe = "0.33"
+egui-file-dialog = "0.12"
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+
+[profile.release]
+lto = true
+strip = true
