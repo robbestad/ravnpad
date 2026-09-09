@@ -41,6 +41,8 @@ On Windows, RavnPad registers itself for text files (`.txt`, `.text`, `.log`, `.
 | Save as   | Ctrl+Shift+S |
 | Quit      | Ctrl+Q       |
 
+The **Language** menu sets the UI language. RavnPad starts in the system language when it is one of the built-in ones (Norwegian Bokmål and Nynorsk, English, Swedish, Danish, Icelandic, German, Dutch, French, Spanish, Italian, Portuguese, Finnish, Polish, and Czech). The choice is remembered.
+
 Unsaved changes prompt before New, Open, Quit, and drag-and-drop. Only UTF-8 is supported. Files larger than 2 MB open as a read-only view (scroll through the file without loading it all into memory), so large logs do not freeze the app.
 
 Open a file from the command line with `ravnpad file.txt` (or drop the file on the program icon). Drag-and-drop into the window works on Windows and on Linux via X11.
