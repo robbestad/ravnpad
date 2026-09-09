@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use egui_file_dialog::FileDialogLabels;
 
 use crate::large::FileError;
@@ -137,6 +135,10 @@ impl Lang {
 pub struct UiText {
     pub file_menu: &'static str,
     pub language_menu: &'static str,
+    pub settings_menu: &'static str,
+    pub font_label: &'static str,
+    pub font_size_label: &'static str,
+    pub font_default: &'static str,
     pub new: &'static str,
     pub open: &'static str,
     pub save: &'static str,
@@ -157,6 +159,7 @@ pub struct UiText {
     pub cannot_save: &'static str,
     pub cannot_read: &'static str,
     pub invalid_utf8: &'static str,
+    pub invalid_rtf: &'static str,
     pub too_large_edit: &'static str,
     pub drop_too_large: &'static str,
     pub decimal: char,
@@ -214,6 +217,7 @@ impl UiText {
             FileError::Open(err) => format!("{}:\n{err}", self.cannot_open),
             FileError::Read(err) => format!("{}:\n{err}", self.cannot_read),
             FileError::InvalidUtf8 => self.invalid_utf8.to_owned(),
+            FileError::InvalidRtf => self.invalid_rtf.to_owned(),
         }
     }
 
@@ -265,48 +269,8 @@ impl UiText {
     }
 }
 
-pub fn load() -> Lang {
-    if let Some(path) = config_path()
-        && let Ok(code) = std::fs::read_to_string(path)
-        && let Some(lang) = Lang::from_code(code.trim())
-    {
-        return lang;
-    }
-    detect()
-}
-
-pub fn save(lang: Lang) {
-    if let Some(path) = config_path() {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, lang.code());
-    }
-}
-
 pub fn detect() -> Lang {
     Lang::from_locale(&system_locale().unwrap_or_default()).unwrap_or(Lang::English)
-}
-
-fn config_path() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        Some(PathBuf::from(std::env::var_os("APPDATA")?).join("RavnPad").join("language"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Some(
-            PathBuf::from(std::env::var_os("HOME")?)
-                .join("Library/Application Support/RavnPad/language"),
-        )
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".config")))?;
-        Some(base.join("ravnpad").join("language"))
-    }
 }
 
 fn system_locale() -> Option<String> {
@@ -332,6 +296,10 @@ fn system_locale() -> Option<String> {
 const EN: UiText = UiText {
     file_menu: "File",
     language_menu: "Language",
+    settings_menu: "Settings",
+    font_label: "Font",
+    font_size_label: "Size",
+    font_default: "Default",
     new: "New",
     open: "Open…",
     save: "Save",
@@ -352,6 +320,7 @@ const EN: UiText = UiText {
     cannot_save: "Could not save the file",
     cannot_read: "Could not read the file",
     invalid_utf8: "The file is not valid UTF-8 text.",
+    invalid_rtf: "Could not convert the RTF file to text.",
     too_large_edit: "The file is too large to edit in RavnPad. This view is read-only.",
     drop_too_large: "The file is too large to open via drag-and-drop. Open it from disk instead.",
     decimal: '.',
@@ -398,6 +367,10 @@ const EN: UiText = UiText {
 const NB: UiText = UiText {
     file_menu: "Fil",
     language_menu: "Språk",
+    settings_menu: "Innstillinger",
+    font_label: "Skrift",
+    font_size_label: "Størrelse",
+    font_default: "Standard",
     new: "Ny",
     open: "Åpne…",
     save: "Lagre",
@@ -418,6 +391,7 @@ const NB: UiText = UiText {
     cannot_save: "Kunne ikke lagre filen",
     cannot_read: "Kunne ikke lese filen",
     invalid_utf8: "Filen er ikke gyldig UTF-8-tekst.",
+    invalid_rtf: "Kunne ikke konvertere RTF-filen til tekst.",
     too_large_edit: "Filen er for stor til å redigeres i RavnPad. Visningen er skrivebeskyttet.",
     drop_too_large: "Filen er for stor til å åpnes via dra-og-slipp. Åpne den fra disk i stedet.",
     decimal: ',',
@@ -464,6 +438,10 @@ const NB: UiText = UiText {
 const NN: UiText = UiText {
     file_menu: "Fil",
     language_menu: "Språk",
+    settings_menu: "Innstillingar",
+    font_label: "Skrift",
+    font_size_label: "Storleik",
+    font_default: "Standard",
     new: "Ny",
     open: "Opne…",
     save: "Lagre",
@@ -484,6 +462,7 @@ const NN: UiText = UiText {
     cannot_save: "Kunne ikkje lagre fila",
     cannot_read: "Kunne ikkje lese fila",
     invalid_utf8: "Fila er ikkje gyldig UTF-8-tekst.",
+    invalid_rtf: "Kunne ikkje konvertere RTF-fila til tekst.",
     too_large_edit: "Fila er for stor til å redigerast i RavnPad. Visinga er skriveverna.",
     drop_too_large: "Fila er for stor til å opnast via dra-og-slep. Opne ho frå disk i staden.",
     decimal: ',',
@@ -530,6 +509,10 @@ const NN: UiText = UiText {
 const SV: UiText = UiText {
     file_menu: "Arkiv",
     language_menu: "Språk",
+    settings_menu: "Inställningar",
+    font_label: "Typsnitt",
+    font_size_label: "Storlek",
+    font_default: "Standard",
     new: "Ny",
     open: "Öppna…",
     save: "Spara",
@@ -550,6 +533,7 @@ const SV: UiText = UiText {
     cannot_save: "Kunde inte spara filen",
     cannot_read: "Kunde inte läsa filen",
     invalid_utf8: "Filen är inte giltig UTF-8-text.",
+    invalid_rtf: "Kunde inte konvertera RTF-filen till text.",
     too_large_edit: "Filen är för stor för att redigeras i RavnPad. Visningen är skrivskyddad.",
     drop_too_large: "Filen är för stor för att öppnas via dra-och-släpp. Öppna den från disken i stället.",
     decimal: ',',
@@ -596,6 +580,10 @@ const SV: UiText = UiText {
 const DA: UiText = UiText {
     file_menu: "Filer",
     language_menu: "Sprog",
+    settings_menu: "Indstillinger",
+    font_label: "Skrifttype",
+    font_size_label: "Størrelse",
+    font_default: "Standard",
     new: "Ny",
     open: "Åbn…",
     save: "Gem",
@@ -616,6 +604,7 @@ const DA: UiText = UiText {
     cannot_save: "Kunne ikke gemme filen",
     cannot_read: "Kunne ikke læse filen",
     invalid_utf8: "Filen er ikke gyldig UTF-8-tekst.",
+    invalid_rtf: "Kunne ikke konvertere RTF-filen til tekst.",
     too_large_edit: "Filen er for stor til at redigeres i RavnPad. Visningen er skrivebeskyttet.",
     drop_too_large: "Filen er for stor til at åbnes via træk-og-slip. Åbn den fra disken i stedet.",
     decimal: ',',
@@ -662,6 +651,10 @@ const DA: UiText = UiText {
 const DE: UiText = UiText {
     file_menu: "Datei",
     language_menu: "Sprache",
+    settings_menu: "Einstellungen",
+    font_label: "Schriftart",
+    font_size_label: "Größe",
+    font_default: "Standard",
     new: "Neu",
     open: "Öffnen…",
     save: "Speichern",
@@ -682,6 +675,7 @@ const DE: UiText = UiText {
     cannot_save: "Datei konnte nicht gespeichert werden",
     cannot_read: "Datei konnte nicht gelesen werden",
     invalid_utf8: "Die Datei ist kein gültiger UTF-8-Text.",
+    invalid_rtf: "Die RTF-Datei konnte nicht in Text umgewandelt werden.",
     too_large_edit: "Die Datei ist zu groß zum Bearbeiten in RavnPad. Die Ansicht ist schreibgeschützt.",
     drop_too_large: "Die Datei ist zu groß zum Öffnen per Drag-and-drop. Öffnen Sie sie von der Festplatte.",
     decimal: ',',
@@ -728,6 +722,10 @@ const DE: UiText = UiText {
 const NL: UiText = UiText {
     file_menu: "Bestand",
     language_menu: "Taal",
+    settings_menu: "Instellingen",
+    font_label: "Lettertype",
+    font_size_label: "Grootte",
+    font_default: "Standaard",
     new: "Nieuw",
     open: "Openen…",
     save: "Opslaan",
@@ -748,6 +746,7 @@ const NL: UiText = UiText {
     cannot_save: "Kan het bestand niet opslaan",
     cannot_read: "Kan het bestand niet lezen",
     invalid_utf8: "Het bestand is geen geldige UTF-8-tekst.",
+    invalid_rtf: "Het RTF-bestand kon niet naar tekst worden omgezet.",
     too_large_edit: "Het bestand is te groot om in RavnPad te bewerken. Deze weergave is alleen-lezen.",
     drop_too_large: "Het bestand is te groot om via slepen-en-neerzetten te openen. Open het vanaf de schijf.",
     decimal: ',',
@@ -794,6 +793,10 @@ const NL: UiText = UiText {
 const FR: UiText = UiText {
     file_menu: "Fichier",
     language_menu: "Langue",
+    settings_menu: "Paramètres",
+    font_label: "Police",
+    font_size_label: "Taille",
+    font_default: "Par défaut",
     new: "Nouveau",
     open: "Ouvrir…",
     save: "Enregistrer",
@@ -814,6 +817,7 @@ const FR: UiText = UiText {
     cannot_save: "Impossible d’enregistrer le fichier",
     cannot_read: "Impossible de lire le fichier",
     invalid_utf8: "Le fichier n’est pas un texte UTF-8 valide.",
+    invalid_rtf: "Impossible de convertir le fichier RTF en texte.",
     too_large_edit: "Le fichier est trop volumineux pour être modifié dans RavnPad. Cet affichage est en lecture seule.",
     drop_too_large: "Le fichier est trop volumineux pour être ouvert par glisser-déposer. Ouvrez-le depuis le disque.",
     decimal: ',',
@@ -860,6 +864,10 @@ const FR: UiText = UiText {
 const ES: UiText = UiText {
     file_menu: "Archivo",
     language_menu: "Idioma",
+    settings_menu: "Ajustes",
+    font_label: "Fuente",
+    font_size_label: "Tamaño",
+    font_default: "Predeterminada",
     new: "Nuevo",
     open: "Abrir…",
     save: "Guardar",
@@ -880,6 +888,7 @@ const ES: UiText = UiText {
     cannot_save: "No se pudo guardar el archivo",
     cannot_read: "No se pudo leer el archivo",
     invalid_utf8: "El archivo no es texto UTF-8 válido.",
+    invalid_rtf: "No se pudo convertir el archivo RTF a texto.",
     too_large_edit: "El archivo es demasiado grande para editarlo en RavnPad. Esta vista es de solo lectura.",
     drop_too_large: "El archivo es demasiado grande para abrirlo arrastrándolo. Ábralo desde el disco.",
     decimal: ',',
@@ -926,6 +935,10 @@ const ES: UiText = UiText {
 const IT: UiText = UiText {
     file_menu: "File",
     language_menu: "Lingua",
+    settings_menu: "Impostazioni",
+    font_label: "Carattere",
+    font_size_label: "Dimensione",
+    font_default: "Predefinito",
     new: "Nuovo",
     open: "Apri…",
     save: "Salva",
@@ -946,6 +959,7 @@ const IT: UiText = UiText {
     cannot_save: "Impossibile salvare il file",
     cannot_read: "Impossibile leggere il file",
     invalid_utf8: "Il file non è testo UTF-8 valido.",
+    invalid_rtf: "Impossibile convertire il file RTF in testo.",
     too_large_edit: "Il file è troppo grande per essere modificato in RavnPad. Questa vista è in sola lettura.",
     drop_too_large: "Il file è troppo grande per l’apertura tramite trascinamento. Aprilo dal disco.",
     decimal: ',',
@@ -992,6 +1006,10 @@ const IT: UiText = UiText {
 const PT: UiText = UiText {
     file_menu: "Ficheiro",
     language_menu: "Idioma",
+    settings_menu: "Definições",
+    font_label: "Tipo de letra",
+    font_size_label: "Tamanho",
+    font_default: "Predefinido",
     new: "Novo",
     open: "Abrir…",
     save: "Guardar",
@@ -1012,6 +1030,7 @@ const PT: UiText = UiText {
     cannot_save: "Não foi possível guardar o ficheiro",
     cannot_read: "Não foi possível ler o ficheiro",
     invalid_utf8: "O ficheiro não é texto UTF-8 válido.",
+    invalid_rtf: "Não foi possível converter o ficheiro RTF em texto.",
     too_large_edit: "O ficheiro é demasiado grande para ser editado no RavnPad. Esta vista é só de leitura.",
     drop_too_large: "O ficheiro é demasiado grande para abrir por arrastar. Abra-o a partir do disco.",
     decimal: ',',
@@ -1058,6 +1077,10 @@ const PT: UiText = UiText {
 const FI: UiText = UiText {
     file_menu: "Tiedosto",
     language_menu: "Kieli",
+    settings_menu: "Asetukset",
+    font_label: "Fontti",
+    font_size_label: "Koko",
+    font_default: "Oletus",
     new: "Uusi",
     open: "Avaa…",
     save: "Tallenna",
@@ -1078,6 +1101,7 @@ const FI: UiText = UiText {
     cannot_save: "Tiedostoa ei voitu tallentaa",
     cannot_read: "Tiedostoa ei voitu lukea",
     invalid_utf8: "Tiedosto ei ole kelvollista UTF-8-tekstiä.",
+    invalid_rtf: "RTF-tiedostoa ei voitu muuntaa tekstiksi.",
     too_large_edit: "Tiedosto on liian suuri muokattavaksi RavnPadissa. Näkymä on vain luku.",
     drop_too_large: "Tiedosto on liian suuri avattavaksi raahaamalla. Avaa se levyltä.",
     decimal: ',',
@@ -1124,6 +1148,10 @@ const FI: UiText = UiText {
 const PL: UiText = UiText {
     file_menu: "Plik",
     language_menu: "Język",
+    settings_menu: "Ustawienia",
+    font_label: "Czcionka",
+    font_size_label: "Rozmiar",
+    font_default: "Domyślna",
     new: "Nowy",
     open: "Otwórz…",
     save: "Zapisz",
@@ -1144,6 +1172,7 @@ const PL: UiText = UiText {
     cannot_save: "Nie można zapisać pliku",
     cannot_read: "Nie można odczytać pliku",
     invalid_utf8: "Plik nie jest poprawnym tekstem UTF-8.",
+    invalid_rtf: "Nie można przekonwertować pliku RTF na tekst.",
     too_large_edit: "Plik jest za duży, aby edytować go w RavnPad. Ten widok jest tylko do odczytu.",
     drop_too_large: "Plik jest za duży, aby otworzyć go metodą przeciągnij i upuść. Otwórz go z dysku.",
     decimal: ',',
@@ -1190,6 +1219,10 @@ const PL: UiText = UiText {
 const IS: UiText = UiText {
     file_menu: "Skrá",
     language_menu: "Tungumál",
+    settings_menu: "Stillingar",
+    font_label: "Letur",
+    font_size_label: "Stærð",
+    font_default: "Sjálfgefið",
     new: "Nýtt",
     open: "Opna…",
     save: "Vista",
@@ -1210,6 +1243,7 @@ const IS: UiText = UiText {
     cannot_save: "Gat ekki vistað skrána",
     cannot_read: "Gat ekki lesið skrána",
     invalid_utf8: "Skráin er ekki gildur UTF-8-texti.",
+    invalid_rtf: "Gat ekki umbreytt RTF-skránni í texta.",
     too_large_edit: "Skráin er of stór til að breyta í RavnPad. Þessi sýn er skrifvarin.",
     drop_too_large: "Skráin er of stór til að opna með dragi og sleppi. Opnaðu hana af diski.",
     decimal: ',',
@@ -1256,6 +1290,10 @@ const IS: UiText = UiText {
 const CS: UiText = UiText {
     file_menu: "Soubor",
     language_menu: "Jazyk",
+    settings_menu: "Nastavení",
+    font_label: "Písmo",
+    font_size_label: "Velikost",
+    font_default: "Výchozí",
     new: "Nový",
     open: "Otevřít…",
     save: "Uložit",
@@ -1276,6 +1314,7 @@ const CS: UiText = UiText {
     cannot_save: "Soubor se nepodařilo uložit",
     cannot_read: "Soubor se nepodařilo přečíst",
     invalid_utf8: "Soubor není platný text UTF-8.",
+    invalid_rtf: "Soubor RTF se nepodařilo převést na text.",
     too_large_edit: "Soubor je příliš velký na úpravy v RavnPad. Toto zobrazení je jen ke čtení.",
     drop_too_large: "Soubor je příliš velký na otevření přetažením. Otevřete jej z disku.",
     decimal: ',',

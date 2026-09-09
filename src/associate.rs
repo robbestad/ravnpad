@@ -9,7 +9,7 @@ const APP_NAME: &str = "RavnPad";
 
 const DEFAULT_EXTS: &[&str] = &[".txt", ".text", ".log", ".md"];
 const OPEN_WITH_EXTS: &[&str] = &[
-    ".txt", ".text", ".log", ".md", ".csv", ".ini", ".cfg", ".conf", ".nfo", ".asc",
+    ".txt", ".text", ".log", ".md", ".rtf", ".csv", ".ini", ".cfg", ".conf", ".nfo", ".asc",
 ];
 
 pub fn register() {

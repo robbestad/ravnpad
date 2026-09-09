@@ -4,15 +4,18 @@ use std::fs;
 use std::path::PathBuf;
 
 use eframe::egui::{
-    self, containers::scroll_area::ScrollSource, Align, Align2, Color32, FontFamily, FontId, Key,
+    self, containers::scroll_area::ScrollSource, Align, Align2, Color32, FontId, Key,
     KeyboardShortcut, Layout, Modifiers, TextStyle, ViewportCommand,
 };
 use egui_file_dialog::{DialogState, FileDialog};
 
 #[cfg(windows)]
 mod associate;
+mod fonts;
 mod i18n;
 mod large;
+mod prefs;
+mod rtf;
 
 const APP_NAME: &str = "RavnPad";
 
@@ -27,7 +30,8 @@ fn main() -> eframe::Result {
     #[cfg(windows)]
     associate::register();
 
-    let lang = i18n::load();
+    let prefs = prefs::Prefs::load();
+    let lang = prefs.lang;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("ravnpad")
@@ -53,7 +57,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         APP_NAME,
         options,
-        Box::new(move |cc| Ok(Box::new(RavnPad::new(cc, initial_path(), lang)))),
+        Box::new(move |cc| Ok(Box::new(RavnPad::new(cc, initial_path(), prefs)))),
     )
 }
 
@@ -98,7 +102,9 @@ struct RavnPad {
     saved_text: String,
     path: Option<PathBuf>,
     large: Option<large::LargeView>,
-    lang: i18n::Lang,
+    prefs: prefs::Prefs,
+    fonts: Vec<fonts::FontChoice>,
+    settings_open: bool,
     last_title: String,
     last_size: egui::Vec2,
     file_dialog: FileDialog,
@@ -108,25 +114,24 @@ struct RavnPad {
 }
 
 impl RavnPad {
-    fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>, lang: i18n::Lang) -> Self {
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.text_styles.insert(
-            TextStyle::Body,
-            FontId::new(14.0, FontFamily::Proportional),
-        );
-        style.text_styles.insert(
-            TextStyle::Monospace,
-            FontId::new(15.0, FontFamily::Monospace),
-        );
-        cc.egui_ctx.set_style(style);
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial: Option<PathBuf>,
+        prefs: prefs::Prefs,
+    ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
+        let font_list = fonts::available_fonts();
+        fonts::apply(&cc.egui_ctx, &prefs.font, prefs.size, &font_list);
+        let lang = prefs.lang;
 
         let mut app = Self {
             text: String::new(),
             saved_text: String::new(),
             path: None,
             large: None,
-            lang,
+            prefs,
+            fonts: font_list,
+            settings_open: false,
             last_title: String::new(),
             last_size: egui::Vec2::ZERO,
             file_dialog: FileDialog::new()
@@ -146,21 +151,94 @@ impl RavnPad {
     }
 
     fn t(&self) -> &'static i18n::UiText {
-        self.lang.text()
+        self.prefs.lang.text()
     }
 
     fn set_lang(&mut self, lang: i18n::Lang) {
-        if self.lang == lang {
+        if self.prefs.lang == lang {
             return;
         }
-        self.lang = lang;
-        i18n::save(lang);
+        self.prefs.lang = lang;
+        self.prefs.save();
         let t = lang.text();
         self.file_dialog.config_mut().labels = t.file_dialog();
         if self.path.is_none() {
             self.file_dialog.config_mut().default_file_name = t.untitled_file.to_owned();
         }
         self.last_title.clear();
+    }
+
+    fn apply_editor_font(&mut self, ctx: &egui::Context) {
+        fonts::apply(ctx, &self.prefs.font, self.prefs.size, &self.fonts);
+        self.prefs.save();
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let t = self.t();
+        let mut open = self.settings_open;
+        egui::Window::new(t.settings_menu)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.label(t.language_menu);
+                let mut lang = self.prefs.lang;
+                egui::ComboBox::from_id_salt("settings_lang")
+                    .selected_text(lang.native_name())
+                    .width(280.0)
+                    .show_ui(ui, |ui| {
+                        for &choice in i18n::Lang::ALL {
+                            ui.selectable_value(&mut lang, choice, choice.native_name());
+                        }
+                    });
+                if lang != self.prefs.lang {
+                    self.set_lang(lang);
+                }
+
+                ui.add_space(8.0);
+                ui.label(t.font_label);
+                let mut font = self.prefs.font.clone();
+                let current_name = self
+                    .fonts
+                    .iter()
+                    .find(|choice| choice.id == font)
+                    .map(|choice| {
+                        if choice.id.is_empty() {
+                            t.font_default
+                        } else {
+                            choice.name.as_str()
+                        }
+                    })
+                    .unwrap_or(t.font_default);
+                egui::ComboBox::from_id_salt("settings_font")
+                    .selected_text(current_name)
+                    .width(280.0)
+                    .show_ui(ui, |ui| {
+                        for choice in &self.fonts {
+                            let label = if choice.id.is_empty() {
+                                t.font_default
+                            } else {
+                                choice.name.as_str()
+                            };
+                            ui.selectable_value(&mut font, choice.id.clone(), label);
+                        }
+                    });
+                if font != self.prefs.font {
+                    self.prefs.font = font;
+                    self.apply_editor_font(ctx);
+                }
+
+                ui.add_space(8.0);
+                ui.label(t.font_size_label);
+                let mut size = self.prefs.size;
+                if ui.add(egui::Slider::new(&mut size, 10.0..=36.0)).changed() {
+                    self.prefs.size = size;
+                    self.apply_editor_font(ctx);
+                }
+            });
+        self.settings_open = open;
     }
 
     fn is_dirty(&self) -> bool {
@@ -263,6 +341,18 @@ impl RavnPad {
                 self.large = Some(view);
                 self.path = Some(path);
             }
+            Ok(large::Opened::Converted { text, txt_path }) => {
+                self.large = None;
+                self.text = text;
+                self.path = Some(txt_path.clone());
+                match save_text(&txt_path, &self.text) {
+                    Ok(()) => self.saved_text.clone_from(&self.text),
+                    Err(err) => {
+                        self.saved_text.clear();
+                        self.error = Some(AppError::Save(err));
+                    }
+                }
+            }
             Err(err) => self.error = Some(AppError::File(err)),
         }
     }
@@ -314,6 +404,14 @@ impl RavnPad {
             if bytes.len() as u64 > large::EDIT_LIMIT {
                 self.error = Some(AppError::DropTooLarge);
                 None
+            } else if rtf::looks_like_rtf(&bytes) {
+                match rtf::to_text(&bytes) {
+                    Ok(text) => Some(Action::OpenBytes(text)),
+                    Err(()) => {
+                        self.error = Some(AppError::File(large::FileError::InvalidRtf));
+                        None
+                    }
+                }
             } else {
                 match String::from_utf8(bytes.to_vec()) {
                     Ok(text) => Some(Action::OpenBytes(text)),
@@ -363,17 +461,9 @@ impl eframe::App for RavnPad {
                         action = Some(Action::Quit);
                     }
                 });
-                ui.menu_button(t.language_menu, |ui| {
-                    for &lang in i18n::Lang::ALL {
-                        if ui
-                            .selectable_label(self.lang == lang, lang.native_name())
-                            .clicked()
-                        {
-                            self.set_lang(lang);
-                            ui.close();
-                        }
-                    }
-                });
+                if ui.button(t.settings_menu).clicked() {
+                    self.settings_open = true;
+                }
             });
         });
 
@@ -432,6 +522,10 @@ impl eframe::App for RavnPad {
                     });
             }
         });
+
+        if self.settings_open {
+            self.settings_window(ctx);
+        }
 
         preview_drop(ctx, t.drop_to_open);
         fit_file_dialog(&mut self.file_dialog, ctx);
@@ -500,6 +594,7 @@ impl eframe::App for RavnPad {
                         }
                     }
                     ConfirmChoice::Discard => {
+                        self.saved_text.clone_from(&self.text);
                         if matches!(pending, Action::Quit) {
                             ctx.send_viewport_cmd(ViewportCommand::Close);
                         } else {
@@ -539,7 +634,9 @@ impl eframe::App for RavnPad {
 
         if ctx.input(|input| input.viewport().close_requested()) && self.is_dirty() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            action = Some(Action::Quit);
+            if self.confirm.is_none() {
+                action = Some(Action::Quit);
+            }
         }
 
         if let Some(action) = action {
@@ -581,7 +678,9 @@ fn load_text(path: &std::path::Path) -> Result<String, String> {
     match large::open(path) {
         Ok(large::Opened::Edit(text)) => Ok(text),
         Ok(large::Opened::View(_)) => Err("too large".to_owned()),
+        Ok(large::Opened::Converted { text, .. }) => Ok(text),
         Err(large::FileError::InvalidUtf8) => Err("UTF-8".to_owned()),
+        Err(large::FileError::InvalidRtf) => Err("RTF".to_owned()),
         Err(err) => Err(format!("{err:?}")),
     }
 }
