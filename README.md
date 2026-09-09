@@ -4,6 +4,8 @@ A simple UTF-8 notepad. Open, edit, and save text. Nothing more.
 
 ## Install
 
+Prebuilt Windows and macOS binaries are on the [GitHub Releases](https://github.com/robbestad/ravnpad/releases) page.
+
 ```bash
 cargo install ravnpad
 ```
