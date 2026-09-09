@@ -1,5 +1,5 @@
 [package]
-name = "textpad"
+name = "ravnpad"
 version = "0.1.0"
 edition = "2024"
 description = "Enkel les/skriv-notisblokk"
@@ -9,6 +9,15 @@ license = "MIT"
 eframe = "0.33"
 egui-file-dialog = "0.12"
 winit = { version = "0.30", default-features = false, features = ["x11"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
+[build-dependencies]
+ico = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+resvg = "0.45"
+winresource = "0.1"
 
 [profile.release]
 lto = true

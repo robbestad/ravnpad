@@ -4,12 +4,15 @@ use std::fs;
 use std::path::PathBuf;
 
 use eframe::egui::{
-    self, Align, Align2, Color32, FontFamily, FontId, Key, KeyboardShortcut, Layout, Modifiers,
-    TextStyle, ViewportCommand,
+    self, containers::scroll_area::ScrollSource, Align, Align2, Color32, FontFamily, FontId, Key,
+    KeyboardShortcut, Layout, Modifiers, TextStyle, ViewportCommand,
 };
 use egui_file_dialog::{DialogState, FileDialog};
 
-const APP_NAME: &str = "TextPad";
+#[cfg(windows)]
+mod associate;
+
+const APP_NAME: &str = "RavnPad";
 
 const NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -19,9 +22,13 @@ const SAVE_AS: KeyboardShortcut =
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 
 fn main() -> eframe::Result {
-    let mut options = eframe::NativeOptions {
+    #[cfg(windows)]
+    associate::register();
+
+    let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_app_id("textpad")
+            .with_app_id("ravnpad")
+            .with_icon(load_icon())
             .with_inner_size([900.0, 600.0])
             .with_min_inner_size([400.0, 280.0])
             .with_drag_and_drop(true)
@@ -30,29 +37,34 @@ fn main() -> eframe::Result {
         persist_window: false,
         renderer: eframe::Renderer::Glow,
         vsync: true,
-        ..Default::default()
-    };
-
-    // winit has no file-drop events on Wayland. Use X11 (XWayland) so drag-and-drop
-    // and window-manager fullscreen behave like a normal desktop app.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        options.event_loop_builder = Some(Box::new(|builder| {
+        // winit has no file-drop events on Wayland. Use X11 (XWayland) so drag-and-drop
+        // and window-manager fullscreen behave like a normal desktop app.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        event_loop_builder: Some(Box::new(|builder| {
             use winit::platform::x11::EventLoopBuilderExtX11 as _;
             builder.with_x11();
-        }));
-    }
+        })),
+        ..Default::default()
+    };
 
     eframe::run_native(
         APP_NAME,
         options,
-        Box::new(|cc| Ok(Box::new(TextPad::new(cc, initial_path())))),
+        Box::new(|cc| Ok(Box::new(RavnPad::new(cc, initial_path())))),
     )
 }
 
 fn initial_path() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::args_os().nth(1)?);
     path.exists().then_some(path)
+}
+
+fn load_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/ravnpad-icon.png"
+    )))
+    .expect("RavnPad-ikon")
 }
 
 #[derive(Clone)]
@@ -71,7 +83,7 @@ enum DialogKind {
     Save { then: Option<Action> },
 }
 
-struct TextPad {
+struct RavnPad {
     text: String,
     saved_text: String,
     path: Option<PathBuf>,
@@ -83,7 +95,7 @@ struct TextPad {
     error: Option<String>,
 }
 
-impl TextPad {
+impl RavnPad {
     fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         let mut style = (*cc.egui_ctx.style()).clone();
         style.text_styles.insert(
@@ -103,7 +115,9 @@ impl TextPad {
             path: None,
             last_title: String::new(),
             last_size: egui::Vec2::ZERO,
-            file_dialog: FileDialog::new().default_file_name("uten-tittel.txt"),
+            file_dialog: FileDialog::new()
+                .default_file_name("uten-tittel.txt")
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0]),
             dialog_kind: None,
             confirm: None,
             error: None,
@@ -184,7 +198,7 @@ impl TextPad {
     }
 
     fn start_save(&mut self, then: Option<Action>) {
-        self.file_dialog = FileDialog::new().default_file_name(&self.display_name_for_save());
+        self.file_dialog.config_mut().default_file_name = self.display_name_for_save();
         self.dialog_kind = Some(DialogKind::Save { then });
         self.file_dialog.save_file();
     }
@@ -263,7 +277,7 @@ impl TextPad {
     }
 }
 
-impl eframe::App for TextPad {
+impl eframe::App for RavnPad {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         avoid_broken_fullscreen(ctx);
         repaint_on_resize(ctx, &mut self.last_size);
@@ -316,16 +330,37 @@ impl eframe::App for TextPad {
             || self.error.is_some();
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_sized(
-                ui.available_size(),
-                egui::TextEdit::multiline(&mut self.text)
-                    .font(TextStyle::Monospace)
-                    .lock_focus(!dialog_busy)
-                    .interactive(!dialog_busy),
-            );
+            let available = ui.available_size();
+            let row_height = ui.text_style_height(&TextStyle::Monospace);
+            let min_rows = ((available.y / row_height).floor() as usize).max(1);
+
+            egui::ScrollArea::vertical()
+                .id_salt("editor_scroll")
+                .auto_shrink([false, false])
+                .scroll_source(if dialog_busy {
+                    ScrollSource::NONE
+                } else {
+                    ScrollSource {
+                        scroll_bar: true,
+                        drag: false,
+                        mouse_wheel: true,
+                    }
+                })
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.text)
+                            .id(egui::Id::new("editor"))
+                            .font(TextStyle::Monospace)
+                            .desired_width(ui.available_width())
+                            .desired_rows(min_rows)
+                            .lock_focus(!dialog_busy)
+                            .interactive(!dialog_busy),
+                    );
+                });
         });
 
         preview_drop(ctx);
+        fit_file_dialog(&mut self.file_dialog, ctx);
         self.file_dialog.update(ctx);
 
         if matches!(self.file_dialog.state(), DialogState::Cancelled) {
@@ -355,6 +390,8 @@ impl eframe::App for TextPad {
             egui::Window::new("Ulagrede endringer")
                 .collapsible(false)
                 .resizable(false)
+                .constrain(true)
+                .max_size(dialog_max_size(ctx))
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.label(format!(
@@ -362,7 +399,7 @@ impl eframe::App for TextPad {
                         self.display_name()
                     ));
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button("Lagre").clicked() {
                             decision = Some(ConfirmChoice::Save);
                         }
@@ -408,6 +445,8 @@ impl eframe::App for TextPad {
             egui::Window::new("Feil")
                 .collapsible(false)
                 .resizable(false)
+                .constrain(true)
+                .max_size(dialog_max_size(ctx))
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.label(message);
@@ -469,6 +508,22 @@ fn save_text(path: &std::path::Path, text: &str) -> Result<(), String> {
     fs::write(path, text.as_bytes()).map_err(|err| format!("Kunne ikke lagre filen:\n{err}"))
 }
 
+fn dialog_max_size(ctx: &egui::Context) -> egui::Vec2 {
+    let size = ctx.content_rect().size();
+    const PAD: f32 = 16.0;
+    egui::vec2((size.x - PAD).max(120.0), (size.y - PAD).max(100.0))
+}
+
+fn fit_file_dialog(dialog: &mut FileDialog, ctx: &egui::Context) {
+    let max = dialog_max_size(ctx);
+    let cfg = dialog.config_mut();
+    cfg.max_size = Some(max);
+    cfg.min_size = egui::vec2(max.x.min(340.0), max.y.min(170.0));
+    cfg.default_size = egui::vec2(max.x.min(650.0), max.y.min(370.0));
+    cfg.anchor = Some((Align2::CENTER_CENTER, egui::Vec2::ZERO));
+    cfg.show_left_panel = max.x >= 460.0;
+}
+
 fn preview_drop(ctx: &egui::Context) {
     if ctx.input(|input| input.raw.hovered_files.is_empty()) {
         return;
@@ -516,7 +571,7 @@ mod tests {
     #[test]
     fn load_utf8_text() {
         let dir = std::env::temp_dir();
-        let path = dir.join("textpad-utf8-test.txt");
+        let path = dir.join("ravnpad-utf8-test.txt");
         fs_write(&path, "hei\nverden");
         assert_eq!(load_text(&path).unwrap(), "hei\nverden");
         let _ = std::fs::remove_file(path);
@@ -525,7 +580,7 @@ mod tests {
     #[test]
     fn reject_invalid_utf8() {
         let dir = std::env::temp_dir();
-        let path = dir.join("textpad-binary-test.bin");
+        let path = dir.join("ravnpad-binary-test.bin");
         fs_write_bytes(&path, &[0xff, 0xfe, 0x00]);
         let err = load_text(&path).unwrap_err();
         assert!(err.contains("UTF-8"));
@@ -535,7 +590,7 @@ mod tests {
     #[test]
     fn save_and_load_roundtrip() {
         let dir = std::env::temp_dir();
-        let path = dir.join("textpad-roundtrip.txt");
+        let path = dir.join("ravnpad-roundtrip.txt");
         super::save_text(&path, "linje 1\nlinje 2").unwrap();
         assert_eq!(load_text(&path).unwrap(), "linje 1\nlinje 2");
         let _ = std::fs::remove_file(path);
