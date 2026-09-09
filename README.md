@@ -1,4 +1,4 @@
-# TextPad
+# RavnPad
 
 Enkel les/skriv-notisblokk. Åpne, rediger og lagre UTF-8-tekst. Ingenting mer.
 
