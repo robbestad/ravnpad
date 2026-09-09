@@ -15,6 +15,10 @@ cargo install ravnpad
 Download the ZIP for your Mac: `aarch64` for Apple Silicon, or `x86_64` for Intel.
 Extract it and move `RavnPad.app` to Applications.
 
+Finder and Dock use the RavnPress logo from `RavnPad.app/Contents/Resources`.
+The window icon is the same logo, loaded at runtime. Ad hoc signing does not
+remove the icon.
+
 The app uses a free **ad hoc signature**. This checks bundle integrity, but does
 not identify the developer to Apple and is **not notarization**. No paid Apple
 account is needed to build these releases. Gatekeeper may still block an app
@@ -82,6 +86,8 @@ On Windows, RavnPad registers itself for text files (`.txt`, `.text`, `.log`, `.
 | Quit      | Ctrl+Q       |
 
 **Settings** has language, editor font, and font size. RavnPad starts in the system language when it is one of the built-in ones (Norwegian Bokmål and Nynorsk, English, Swedish, Danish, Icelandic, German, Dutch, French, Spanish, Italian, Portuguese, Finnish, Polish, and Czech). Settings are remembered.
+
+On Windows and macOS, RavnPad checks [GitHub Releases](https://github.com/robbestad/ravnpad/releases) for a newer version at startup. Use **Help → Check for updates** to check now; if an update is found, RavnPad downloads it and restarts. Linux builds from `cargo install` are not auto-updated.
 
 Unsaved changes prompt before New, Open, Quit, and drag-and-drop. Only UTF-8 is supported. Opening an `.rtf` file converts it to plain text and saves a `.txt` file next to it. Files larger than 2 MB open as a read-only view (scroll through the file without loading it all into memory), so large logs do not freeze the app.
 

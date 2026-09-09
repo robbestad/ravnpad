@@ -1,7 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::Duration;
 
 use eframe::egui::{
     self, containers::scroll_area::ScrollSource, Align, Align2, Color32, FontId, Key,
@@ -16,6 +20,7 @@ mod i18n;
 mod large;
 mod prefs;
 mod rtf;
+mod update;
 
 const APP_NAME: &str = "RavnPad";
 
@@ -29,6 +34,7 @@ const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q)
 fn main() -> eframe::Result {
     #[cfg(windows)]
     associate::register();
+    update::cleanup_old();
 
     let prefs = prefs::Prefs::load();
     let lang = prefs.lang;
@@ -62,8 +68,7 @@ fn main() -> eframe::Result {
 }
 
 fn initial_path() -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::args_os().nth(1)?);
-    path.exists().then_some(path)
+    std::env::args_os().nth(1).map(PathBuf::from)
 }
 
 fn load_icon() -> egui::IconData {
@@ -83,6 +88,8 @@ enum Action {
     Quit,
     OpenPath(PathBuf),
     OpenBytes(String),
+    CheckUpdate,
+    InstallUpdate { url: String },
 }
 
 enum DialogKind {
@@ -111,6 +118,10 @@ struct RavnPad {
     dialog_kind: Option<DialogKind>,
     confirm: Option<Action>,
     error: Option<AppError>,
+    update_tx: Sender<UpdateEvent>,
+    update_rx: Receiver<UpdateEvent>,
+    update: UpdateUi,
+    restarting: bool,
 }
 
 impl RavnPad {
@@ -123,6 +134,7 @@ impl RavnPad {
         let font_list = fonts::available_fonts();
         fonts::apply(&cc.egui_ctx, &prefs.font, prefs.size, &font_list);
         let lang = prefs.lang;
+        let (update_tx, update_rx) = mpsc::channel();
 
         let mut app = Self {
             text: String::new(),
@@ -137,11 +149,20 @@ impl RavnPad {
             file_dialog: FileDialog::new()
                 .default_file_name(lang.text().untitled_file)
                 .labels(lang.text().file_dialog())
+                .canonicalize_paths(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0]),
             dialog_kind: None,
             confirm: None,
             error: None,
+            update_tx,
+            update_rx,
+            update: UpdateUi::Idle,
+            restarting: false,
         };
+
+        if !cfg!(debug_assertions) {
+            app.spawn_update_check(false);
+        }
 
         if let Some(path) = initial {
             app.open_path(path);
@@ -237,6 +258,9 @@ impl RavnPad {
                     self.prefs.size = size;
                     self.apply_editor_font(ctx);
                 }
+
+                ui.add_space(12.0);
+                ui.weak(format!("RavnPad {}", update::CURRENT));
             });
         self.settings_open = open;
     }
@@ -261,7 +285,12 @@ impl RavnPad {
     fn request(&mut self, action: Action) {
         if matches!(
             action,
-            Action::New | Action::Open | Action::Quit | Action::OpenPath(_) | Action::OpenBytes(_)
+            Action::New
+                | Action::Open
+                | Action::Quit
+                | Action::OpenPath(_)
+                | Action::OpenBytes(_)
+                | Action::InstallUpdate { .. }
         ) && self.is_dirty()
         {
             self.confirm = Some(action);
@@ -308,7 +337,204 @@ impl RavnPad {
                 self.saved_text.clone_from(&self.text);
                 self.path = None;
             }
+            Action::CheckUpdate => {
+                self.update = UpdateUi::Checking { user: true };
+                self.spawn_update_check(true);
+            }
+            Action::InstallUpdate { url } => self.spawn_install(url),
         }
+    }
+
+    fn spawn_update_check(&self, user: bool) {
+        let tx = self.update_tx.clone();
+        thread::spawn(move || {
+            let event = if update::asset_name().is_none() {
+                user.then_some(UpdateEvent::Unsupported)
+            } else {
+                match update::check_latest() {
+                    Ok(update::Check::Available { version, url }) => {
+                        Some(UpdateEvent::Available { version, url })
+                    }
+                    Ok(update::Check::UpToDate) if user => Some(UpdateEvent::UpToDate),
+                    Err(err) if user => Some(UpdateEvent::Failed(err.to_string())),
+                    _ => None,
+                }
+            };
+            if let Some(event) = event {
+                let _ = tx.send(event);
+            }
+        });
+    }
+
+    fn spawn_install(&mut self, url: String) {
+        self.update = UpdateUi::Downloading;
+        let tx = self.update_tx.clone();
+        thread::spawn(move || {
+            let event = match update::install(&url) {
+                Ok(restart) => UpdateEvent::Ready(restart),
+                Err(err) => UpdateEvent::Failed(err.to_string()),
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    fn poll_update(&mut self, ctx: &egui::Context) -> Option<Action> {
+        while let Ok(event) = self.update_rx.try_recv() {
+            match event {
+                UpdateEvent::Available { version, url } => {
+                    self.update = UpdateUi::Available { version, url };
+                }
+                UpdateEvent::UpToDate => {
+                    self.update = if matches!(self.update, UpdateUi::Checking { user: true }) {
+                        UpdateUi::UpToDate
+                    } else {
+                        UpdateUi::Idle
+                    };
+                }
+                UpdateEvent::Failed(message) => {
+                    let show = matches!(
+                        self.update,
+                        UpdateUi::Checking { user: true } | UpdateUi::Downloading
+                    );
+                    self.update = if show {
+                        UpdateUi::Failed(message)
+                    } else {
+                        UpdateUi::Idle
+                    };
+                }
+                UpdateEvent::Unsupported => {
+                    self.update = if matches!(self.update, UpdateUi::Checking { user: true }) {
+                        UpdateUi::Unsupported
+                    } else {
+                        UpdateUi::Idle
+                    };
+                }
+                UpdateEvent::Ready(restart) => {
+                    let launched = match restart {
+                        update::Restart::Spawn(exe) => {
+                            let mut cmd = std::process::Command::new(&exe);
+                            cmd.args(std::env::args_os().skip(1));
+                            match cmd.spawn() {
+                                Ok(_) => true,
+                                Err(err) => {
+                                    self.update = UpdateUi::Failed(err.to_string());
+                                    false
+                                }
+                            }
+                        }
+                        #[cfg(target_os = "macos")]
+                        update::Restart::Helper => true,
+                    };
+                    if launched {
+                        self.restarting = true;
+                        self.update = UpdateUi::Idle;
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                }
+            }
+        }
+
+        if !matches!(self.update, UpdateUi::Idle) {
+            ctx.request_repaint();
+        }
+
+        self.show_update_window(ctx)
+    }
+
+    fn show_update_window(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let t = self.t();
+        let mut action = None;
+        let mut close = false;
+        match &self.update {
+            UpdateUi::Idle => {}
+            UpdateUi::Checking { .. } => {
+                egui::Window::new(t.help_menu)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(t.update_checking);
+                    });
+            }
+            UpdateUi::Downloading => {
+                egui::Window::new(t.update_available_title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(t.update_downloading);
+                    });
+            }
+            UpdateUi::Available { version, url } => {
+                let body = t.update_available(version, update::CURRENT);
+                let url = url.clone();
+                egui::Window::new(t.update_available_title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .constrain(true)
+                    .max_size(dialog_max_size(ctx))
+                    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(body);
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button(t.update_now).clicked() {
+                                action = Some(Action::InstallUpdate { url: url.clone() });
+                            }
+                            if ui.button(t.update_later).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+            }
+            UpdateUi::UpToDate => {
+                let body = t.update_uptodate_msg(update::CURRENT);
+                egui::Window::new(t.help_menu)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(body);
+                        ui.add_space(8.0);
+                        if ui.button(t.ok).clicked() {
+                            close = true;
+                        }
+                    });
+            }
+            UpdateUi::Failed(message) => {
+                let message = format!("{}\n{message}", t.update_failed);
+                egui::Window::new(t.error_title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .constrain(true)
+                    .max_size(dialog_max_size(ctx))
+                    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(message);
+                        ui.add_space(8.0);
+                        if ui.button(t.ok).clicked() {
+                            close = true;
+                        }
+                    });
+            }
+            UpdateUi::Unsupported => {
+                egui::Window::new(t.help_menu)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(t.update_unsupported);
+                        ui.add_space(8.0);
+                        if ui.button(t.ok).clicked() {
+                            close = true;
+                        }
+                    });
+            }
+        }
+        if close {
+            self.update = UpdateUi::Idle;
+        }
+        action
     }
 
     fn start_save(&mut self, then: Option<Action>) {
@@ -464,6 +690,14 @@ impl eframe::App for RavnPad {
                 if ui.button(t.settings_menu).clicked() {
                     self.settings_open = true;
                 }
+                ui.menu_button(t.help_menu, |ui| {
+                    ui.label(format!("RavnPad {}", update::CURRENT));
+                    ui.separator();
+                    if ui.button(t.update_menu).clicked() {
+                        action = Some(Action::CheckUpdate);
+                        ui.close();
+                    }
+                });
             });
         });
 
@@ -487,7 +721,8 @@ impl eframe::App for RavnPad {
 
         let dialog_busy = matches!(self.file_dialog.state(), DialogState::Open)
             || self.confirm.is_some()
-            || self.error.is_some();
+            || self.error.is_some()
+            || !matches!(self.update, UpdateUi::Idle);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(view) = &mut self.large {
@@ -632,7 +867,14 @@ impl eframe::App for RavnPad {
             }
         }
 
-        if ctx.input(|input| input.viewport().close_requested()) && self.is_dirty() {
+        if action.is_none() {
+            action = self.poll_update(ctx);
+        }
+
+        if ctx.input(|input| input.viewport().close_requested())
+            && self.is_dirty()
+            && !self.restarting
+        {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             if self.confirm.is_none() {
                 action = Some(Action::Quit);
@@ -663,6 +905,24 @@ enum ConfirmChoice {
     Cancel,
 }
 
+enum UpdateUi {
+    Idle,
+    Checking { user: bool },
+    Available { version: String, url: String },
+    Downloading,
+    UpToDate,
+    Failed(String),
+    Unsupported,
+}
+
+enum UpdateEvent {
+    UpToDate,
+    Available { version: String, url: String },
+    Ready(update::Restart),
+    Failed(String),
+    Unsupported,
+}
+
 fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
     let clicked = ui
         .add(egui::Button::new(label).shortcut_text(shortcut))
@@ -685,8 +945,61 @@ fn load_text(path: &std::path::Path) -> Result<String, String> {
     }
 }
 
-fn save_text(path: &std::path::Path, text: &str) -> Result<(), std::io::Error> {
-    fs::write(path, text.as_bytes())
+fn save_text(path: &Path, text: &str) -> Result<(), io::Error> {
+    let bytes = text.as_bytes();
+    match write_all_path(path, bytes) {
+        Ok(()) => Ok(()),
+        Err(err) if is_transient_io(&err) => {
+            thread::sleep(Duration::from_millis(250));
+            write_all_path(path, bytes)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn write_all_path(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = open_for_save(path)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    let _ = file.sync_all();
+    Ok(())
+}
+
+fn open_for_save(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE so SMB/AV
+        // scanners do not block overwrite.
+        options.share_mode(0x0000_0007);
+    }
+    options.open(path)
+}
+
+fn is_transient_io(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+    ) || matches!(
+        err.raw_os_error(),
+        Some(
+            32 |  // ERROR_SHARING_VIOLATION
+            33 |  // ERROR_LOCK_VIOLATION
+            53 |  // ERROR_BAD_NETPATH
+            59 |  // ERROR_UNEXP_NET_ERR
+            64 |  // ERROR_NETNAME_DELETED
+            121 | // ERROR_SEM_TIMEOUT
+            1231 | 1232 | 1236
+        )
+    )
 }
 
 fn dialog_max_size(ctx: &egui::Context) -> egui::Vec2 {
