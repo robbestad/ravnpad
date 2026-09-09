@@ -192,7 +192,16 @@ impl LargeView {
     }
 }
 
+fn scrollbar_thumb_height(track: f32) -> f32 {
+    if !track.is_finite() || track <= 0.0 {
+        return 0.0;
+    }
+    let min_thumb = 20.0_f32.min(track);
+    (track * 0.08).clamp(min_thumb, track)
+}
+
 fn file_scrollbar(ui: &mut egui::Ui, offset: u64, size: u64, height: f32) -> Option<u64> {
+    let height = if height.is_finite() { height.max(0.0) } else { 0.0 };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, height), Sense::click_and_drag());
     let visuals = ui.visuals();
     ui.painter()
@@ -203,7 +212,7 @@ fn file_scrollbar(ui: &mut egui::Ui, offset: u64, size: u64, height: f32) -> Opt
     } else {
         (offset as f64 / size as f64).clamp(0.0, 1.0) as f32
     };
-    let thumb_h = (rect.height() * 0.08).clamp(20.0, rect.height());
+    let thumb_h = scrollbar_thumb_height(rect.height());
     let travel = (rect.height() - thumb_h).max(0.0);
     let thumb = egui::Rect::from_min_size(
         egui::pos2(rect.left(), rect.top() + t * travel),
@@ -529,6 +538,14 @@ mod tests {
         let back = scan_backward(&mut file, size, 1).unwrap();
         assert_eq!(size - back, MAX_WINDOW as u64);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn scrollbar_thumb_fits_short_track() {
+        assert_eq!(scrollbar_thumb_height(18.0), 18.0);
+        assert_eq!(scrollbar_thumb_height(200.0), 20.0);
+        assert_eq!(scrollbar_thumb_height(400.0), 32.0);
+        assert_eq!(scrollbar_thumb_height(0.0), 0.0);
     }
 
     #[test]
