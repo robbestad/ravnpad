@@ -1,81 +1,70 @@
-# RavnPad
+<p align="center">
+  <img src="https://raw.githubusercontent.com/robbestad/ravnpad/main/ravn-logo.png" alt="RavnPad" width="160">
+</p>
 
-A simple UTF-8 notepad. Open, edit, and save text. Nothing more.
+<h1 align="center">RavnPad</h1>
 
-## Install
+<p align="center">
+  A fast, honest notepad. Open a file, write, save. That is the whole product.
+</p>
 
-Prebuilt Windows and macOS binaries are on the [GitHub Releases](https://github.com/robbestad/ravnpad/releases) page.
+<p align="center">
+  <a href="https://github.com/robbestad/ravnpad/releases"><img src="https://img.shields.io/github/v/release/robbestad/ravnpad?label=download" alt="GitHub release"></a>
+  <a href="https://crates.io/crates/ravnpad"><img src="https://img.shields.io/crates/v/ravnpad.svg" alt="crates.io"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
+</p>
+
+Word is for documents. The web is for everything else. RavnPad is for the file in front of you: a log, a note, a dump, a `.txt` you just want to read and change.
+
+It starts instantly, stays out of the way, and does not try to become an IDE.
+
+## Why people keep it
+
+- **Native Open and Save** — Windows Explorer and macOS Finder, including network shares.
+- **Fifteen languages** — Bokmål, Nynorsk, English, Swedish, Danish, Icelandic, German, Dutch, French, Spanish, Italian, Portuguese, Finnish, Polish, and Czech. Follows the system language when it can.
+- **Your font** — pick a system typeface and size. Settings are remembered.
+- **RTF in, text out** — open `.rtf`, get UTF-8, and a `.txt` saved beside the original.
+- **Huge files** — over 2 MB opens as a read-only windowed view. Scroll a 2 GB log without freezing.
+- **Updates itself** — on Windows and macOS, **Help → Check for updates** (release builds also check at startup).
+- **Open with** — on Windows, register for `.txt` and friends without admin rights. RavnPad does not steal Word as the default handler.
+
+## Get it
+
+**Windows and macOS:** grab a binary from [GitHub Releases](https://github.com/robbestad/ravnpad/releases).
+
+- Windows: unzip and run `ravnpad.exe`
+- Apple Silicon: `ravnpad-macos-aarch64.zip`
+- Intel Mac: `ravnpad-macos-x86_64.zip`
+
+Or install from source:
 
 ```bash
 cargo install ravnpad
 ```
 
-### macOS
+Then run `ravnpad`, or `ravnpad notes.txt`. Drag a file onto the window (Windows, and Linux on X11).
 
-Download the ZIP for your Mac: `aarch64` for Apple Silicon, or `x86_64` for Intel.
-Extract it and move `RavnPad.app` to Applications.
+### macOS first launch
 
-Finder and Dock use the RavnPress logo from `RavnPad.app/Contents/Resources`.
-The window icon is the same logo, loaded at runtime. Ad hoc signing does not
-remove the icon.
+The app is **ad hoc signed**, not Apple-notarized. Gatekeeper may block the first open. If you trust the download from this repository, use **System Settings → Privacy & Security → Open Anyway**. See [Apple’s instructions](https://support.apple.com/en-gb/102445).
 
-The app uses a free **ad hoc signature**. This checks bundle integrity, but does
-not identify the developer to Apple and is **not notarization**. No paid Apple
-account is needed to build these releases. Gatekeeper may still block an app
-downloaded from the internet.
-
-After trying to open it, use **System Settings → Privacy & Security → Open Anyway**
-if available, and only if you trust the download. See
-[Apple's instructions](https://support.apple.com/en-gb/102445).
-
-If macOS says the app is damaged, check its signature before making an exception:
+If macOS says the app is damaged, check the signature before making an exception:
 
 ```bash
 codesign --verify --deep --strict --verbose=4 "/Applications/RavnPad.app"
 ```
 
-If verification fails, download a fresh copy of the latest release and report
-the error if it persists. Do not re-sign the downloaded copy to hide the failure.
+If verification fails, download a fresh copy and report it. Do not re-sign the file to hide a failed check.
 
-If verification succeeds, you downloaded it directly from this repository's
-GitHub Releases, and manual approval is unavailable, you can explicitly remove
-the download quarantine **for this app only**:
+If verification succeeds, you downloaded it from GitHub Releases, and Open Anyway is unavailable, you can clear the quarantine **for this app only**:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/RavnPad.app"
 ```
 
-This bypasses the download quarantine check for RavnPad; it does not notarize it
-or prove the download is trustworthy. Do not disable Gatekeeper system-wide.
+That does not notarize RavnPad. Do not turn Gatekeeper off.
 
-Release builds verify the app signature both before packaging and after extracting
-the ZIP. This does not replace testing the downloaded app on a Mac with Gatekeeper
-enabled.
-
-## Requirements
-
-- [Rust](https://rustup.rs/) 1.88 or newer
-- On Linux: common GUI libraries (`libxcb`, `libxkbcommon`, GTK 3 for native dialogs)
-
-## Run
-
-```bash
-cargo run --release
-```
-
-## Build a Windows exe
-
-On a Windows machine with Rust installed:
-
-```bat
-cargo build --release
-```
-
-The binary is `target\release\ravnpad.exe`. Release builds hide the console window. The app icon is the RavnPress logo.
-
-On Windows, RavnPad registers itself for text files (`.txt`, `.text`, `.log`, `.md`) at startup, without administrator rights. Double-clicking those files opens them in RavnPad. If Windows already has another default app, choose RavnPad under **Open with**.
-
-## Usage
+## Shortcuts
 
 | Action    | Shortcut     |
 | --------- | ------------ |
@@ -85,14 +74,26 @@ On Windows, RavnPad registers itself for text files (`.txt`, `.text`, `.log`, `.
 | Save as   | Ctrl+Shift+S |
 | Quit      | Ctrl+Q       |
 
-Open, Save as, unsaved-changes, and error alerts use the operating system’s own dialogs. Settings stays in-app (egui cannot draw a native Preferences window).
+Unsaved changes ask before New, Open, Quit, and drop. Only UTF-8 is supported.
 
-**Settings** has language, editor font, and font size. RavnPad starts in the system language when it is one of the built-in ones (Norwegian Bokmål and Nynorsk, English, Swedish, Danish, Icelandic, German, Dutch, French, Spanish, Italian, Portuguese, Finnish, Polish, and Czech). Settings are remembered.
+**Settings** (in-app): language, font, and size. File dialogs and alerts use the operating system.
 
-On Windows and macOS, RavnPad checks [GitHub Releases](https://github.com/robbestad/ravnpad/releases) for a newer version at startup. Use **Help → Check for updates** to check now; if an update is found, RavnPad downloads it and restarts. Linux builds from `cargo install` are not auto-updated.
+## Build
 
-Unsaved changes prompt before New, Open, Quit, and drag-and-drop. Only UTF-8 is supported. Opening an `.rtf` file converts it to plain text and saves a `.txt` file next to it. Files larger than 2 MB open as a read-only view (scroll through the file without loading it all into memory), so large logs do not freeze the app.
+Rust **1.88+**. On Linux you also want `libxcb`, `libxkbcommon`, and GTK 3 (native dialogs).
 
-Open a file from the command line with `ravnpad file.txt` (or drop the file on the program icon). Drag-and-drop into the window works on Windows and on Linux via X11.
+```bash
+cargo run --release
+```
 
-The Ravn logo is a registered trademark.
+Windows:
+
+```bat
+cargo build --release
+```
+
+The exe is `target\release\ravnpad.exe`. Release builds hide the console.
+
+## License and mark
+
+MIT. The Ravn logo is a registered trademark.
