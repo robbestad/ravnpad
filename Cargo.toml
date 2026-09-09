@@ -26,6 +26,7 @@ winreg = "0.55"
 winit = { version = "0.30", default-features = false, features = ["x11"] }
 
 [build-dependencies]
+icns = "0.3"
 ico = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 resvg = "0.45"
