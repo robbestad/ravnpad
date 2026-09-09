@@ -17,16 +17,20 @@ pub enum Opened {
     View(LargeView),
 }
 
-pub fn open(path: &Path) -> Result<Opened, String> {
-    let size = fs::metadata(path)
-        .map_err(|err| format!("Kunne ikke åpne filen:\n{err}"))?
-        .len();
+#[derive(Debug)]
+pub enum FileError {
+    Open(std::io::Error),
+    Read(std::io::Error),
+    InvalidUtf8,
+}
+
+pub fn open(path: &Path) -> Result<Opened, FileError> {
+    let size = fs::metadata(path).map_err(FileError::Open)?.len();
     if size > EDIT_LIMIT {
         Ok(Opened::View(LargeView::open(path, size)?))
     } else {
-        let bytes = fs::read(path).map_err(|err| format!("Kunne ikke åpne filen:\n{err}"))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| "Filen er ikke gyldig UTF-8-tekst.".to_owned())?;
+        let bytes = fs::read(path).map_err(FileError::Open)?;
+        let text = String::from_utf8(bytes).map_err(|_| FileError::InvalidUtf8)?;
         Ok(Opened::Edit(text))
     }
 }
@@ -40,8 +44,8 @@ pub struct LargeView {
 }
 
 impl LargeView {
-    fn open(path: &Path, size: u64) -> Result<Self, String> {
-        File::open(path).map_err(|err| format!("Kunne ikke åpne filen:\n{err}"))?;
+    fn open(path: &Path, size: u64) -> Result<Self, FileError> {
+        File::open(path).map_err(FileError::Open)?;
         Ok(Self {
             path: path.to_path_buf(),
             size,
@@ -51,24 +55,28 @@ impl LargeView {
         })
     }
 
-    pub fn status(&self) -> String {
+    pub fn status(&self, view_readonly: &str, decimal: char) -> String {
         let percent = if self.size == 0 {
             0
         } else {
             ((self.offset as f64 / self.size as f64) * 100.0).round() as u64
         };
         format!(
-            "{} · {} % · visning (skrivebeskyttet)",
-            format_size(self.size),
+            "{} · {} % · {view_readonly}",
+            format_size_with(self.size, decimal),
             percent.min(100)
         )
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, dialog_busy: bool) {
+    pub fn show(&mut self, ui: &mut egui::Ui, dialog_busy: bool, cannot_read: &str) {
         let row_height = ui.text_style_height(&TextStyle::Monospace);
         let rows = ((ui.available_height() / row_height).floor() as usize).max(1);
 
-        if let Err(message) = self.ensure_window(rows) {
+        if let Err(err) = self.ensure_window(rows) {
+            let message = match err {
+                FileError::Open(err) | FileError::Read(err) => format!("{cannot_read}:\n{err}"),
+                FileError::InvalidUtf8 => cannot_read.to_owned(),
+            };
             ui.colored_label(Color32::from_rgb(160, 40, 40), message);
             return;
         }
@@ -136,41 +144,36 @@ impl LargeView {
         }
     }
 
-    fn ensure_window(&mut self, rows: usize) -> Result<(), String> {
+    fn ensure_window(&mut self, rows: usize) -> Result<(), FileError> {
         if self.prepared_for == Some((self.offset, rows)) {
             return Ok(());
         }
-        let mut file = File::open(&self.path)
-            .map_err(|err| format!("Kunne ikke lese filen:\n{err}"))?;
+        let mut file = File::open(&self.path).map_err(FileError::Read)?;
         self.size = file
             .metadata()
             .map(|meta| meta.len())
             .unwrap_or(self.size);
-        self.offset = align_line_start(&mut file, self.offset, self.size)
-            .map_err(|err| format!("Kunne ikke lese filen:\n{err}"))?;
-        self.window = read_window(&mut file, self.offset, self.size, rows)
-            .map_err(|err| format!("Kunne ikke lese filen:\n{err}"))?;
+        self.offset = align_line_start(&mut file, self.offset, self.size).map_err(FileError::Read)?;
+        self.window = read_window(&mut file, self.offset, self.size, rows).map_err(FileError::Read)?;
         self.prepared_for = Some((self.offset, rows));
         Ok(())
     }
 
-    fn scroll_lines(&mut self, delta: i64, rows: usize) -> Result<(), String> {
+    fn scroll_lines(&mut self, delta: i64, rows: usize) -> Result<(), FileError> {
         if delta == 0 {
             return Ok(());
         }
-        let mut file = File::open(&self.path)
-            .map_err(|err| format!("Kunne ikke lese filen:\n{err}"))?;
-        self.offset = move_by_lines(&mut file, self.offset, self.size, delta)
-            .map_err(|err| format!("Kunne ikke lese filen:\n{err}"))?;
+        let mut file = File::open(&self.path).map_err(FileError::Read)?;
+        self.offset =
+            move_by_lines(&mut file, self.offset, self.size, delta).map_err(FileError::Read)?;
         self.prepared_for = None;
         self.ensure_window(rows)
     }
 
-    fn scroll_to_end(&mut self, rows: usize) -> Result<(), String> {
-        let mut file = File::open(&self.path)
-            .map_err(|err| format!("Kunne ikke lese filen:\n{err}"))?;
+    fn scroll_to_end(&mut self, rows: usize) -> Result<(), FileError> {
+        let mut file = File::open(&self.path).map_err(FileError::Read)?;
         self.offset = move_by_lines(&mut file, self.size, self.size, -(rows as i64))
-            .map_err(|err| format!("Kunne ikke lese filen:\n{err}"))?;
+            .map_err(FileError::Read)?;
         self.prepared_for = None;
         self.ensure_window(rows)
     }
@@ -390,6 +393,10 @@ fn scan_backward(file: &mut File, pos: u64, mut lines: u64) -> std::io::Result<u
 }
 
 pub fn format_size(bytes: u64) -> String {
+    format_size_with(bytes, ',')
+}
+
+pub fn format_size_with(bytes: u64, decimal: char) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;
@@ -402,11 +409,8 @@ pub fn format_size(bytes: u64) -> String {
     } else {
         return format!("{bytes} B");
     };
-    format!("{value:.1} {unit}").replace('.', ",")
+    format!("{value:.1} {unit}").replace('.', &decimal.to_string())
 }
-
-pub const LARGE_SAVE_ERROR: &str =
-    "Filen er for stor til å redigeres i RavnPad. Visningen er skrivebeskyttet.";
 
 #[cfg(test)]
 mod tests {
