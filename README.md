@@ -55,7 +55,7 @@ enabled.
 ## Requirements
 
 - [Rust](https://rustup.rs/) 1.88 or newer
-- On Linux: common GUI libraries (`libxcb`, `libxkbcommon`, GTK 3 for file dialogs)
+- On Linux: common GUI libraries (`libxcb`, `libxkbcommon`, GTK 3 for native dialogs)
 
 ## Run
 
@@ -84,6 +84,8 @@ On Windows, RavnPad registers itself for text files (`.txt`, `.text`, `.log`, `.
 | Save      | Ctrl+S       |
 | Save as   | Ctrl+Shift+S |
 | Quit      | Ctrl+Q       |
+
+Open, Save as, unsaved-changes, and error alerts use the operating system’s own dialogs. Settings stays in-app (egui cannot draw a native Preferences window).
 
 **Settings** has language, editor font, and font size. RavnPad starts in the system language when it is one of the built-in ones (Norwegian Bokmål and Nynorsk, English, Swedish, Danish, Icelandic, German, Dutch, French, Spanish, Italian, Portuguese, Finnish, Polish, and Czech). Settings are remembered.
 

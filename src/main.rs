@@ -11,13 +11,13 @@ use eframe::egui::{
     self, containers::scroll_area::ScrollSource, Align, Align2, Color32, FontId, Key,
     KeyboardShortcut, Layout, Modifiers, TextStyle, ViewportCommand,
 };
-use egui_file_dialog::{DialogState, FileDialog};
 
 #[cfg(windows)]
 mod associate;
 mod fonts;
 mod i18n;
 mod large;
+mod native_dialog;
 mod prefs;
 mod rtf;
 mod update;
@@ -92,11 +92,6 @@ enum Action {
     InstallUpdate { url: String },
 }
 
-enum DialogKind {
-    Open,
-    Save { then: Option<Action> },
-}
-
 enum AppError {
     File(large::FileError),
     Save(std::io::Error),
@@ -114,8 +109,6 @@ struct RavnPad {
     settings_open: bool,
     last_title: String,
     last_size: egui::Vec2,
-    file_dialog: FileDialog,
-    dialog_kind: Option<DialogKind>,
     confirm: Option<Action>,
     error: Option<AppError>,
     update_tx: Sender<UpdateEvent>,
@@ -133,7 +126,6 @@ impl RavnPad {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         let font_list = fonts::available_fonts();
         fonts::apply(&cc.egui_ctx, &prefs.font, prefs.size, &font_list);
-        let lang = prefs.lang;
         let (update_tx, update_rx) = mpsc::channel();
 
         let mut app = Self {
@@ -146,12 +138,6 @@ impl RavnPad {
             settings_open: false,
             last_title: String::new(),
             last_size: egui::Vec2::ZERO,
-            file_dialog: FileDialog::new()
-                .default_file_name(lang.text().untitled_file)
-                .labels(lang.text().file_dialog())
-                .canonicalize_paths(false)
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0]),
-            dialog_kind: None,
             confirm: None,
             error: None,
             update_tx,
@@ -181,11 +167,6 @@ impl RavnPad {
         }
         self.prefs.lang = lang;
         self.prefs.save();
-        let t = lang.text();
-        self.file_dialog.config_mut().labels = t.file_dialog();
-        if self.path.is_none() {
-            self.file_dialog.config_mut().default_file_name = t.untitled_file.to_owned();
-        }
         self.last_title.clear();
     }
 
@@ -196,73 +177,86 @@ impl RavnPad {
 
     fn settings_window(&mut self, ctx: &egui::Context) {
         let t = self.t();
-        let mut open = self.settings_open;
-        egui::Window::new(t.settings_menu)
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.set_min_width(320.0);
-                ui.label(t.language_menu);
-                let mut lang = self.prefs.lang;
-                egui::ComboBox::from_id_salt("settings_lang")
-                    .selected_text(lang.native_name())
-                    .width(280.0)
-                    .show_ui(ui, |ui| {
-                        for &choice in i18n::Lang::ALL {
-                            ui.selectable_value(&mut lang, choice, choice.native_name());
-                        }
-                    });
-                if lang != self.prefs.lang {
-                    self.set_lang(lang);
-                }
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("settings")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading(t.settings_menu);
+            ui.add_space(10.0);
 
-                ui.add_space(8.0);
-                ui.label(t.font_label);
-                let mut font = self.prefs.font.clone();
-                let current_name = self
-                    .fonts
-                    .iter()
-                    .find(|choice| choice.id == font)
-                    .map(|choice| {
-                        if choice.id.is_empty() {
+            ui.label(t.language_menu);
+            let mut lang = self.prefs.lang;
+            egui::ComboBox::from_id_salt("settings_lang")
+                .selected_text(lang.native_name())
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for &choice in i18n::Lang::ALL {
+                        ui.selectable_value(&mut lang, choice, choice.native_name());
+                    }
+                });
+            if lang != self.prefs.lang {
+                self.set_lang(lang);
+            }
+
+            ui.add_space(10.0);
+            ui.label(t.font_label);
+            let mut font = self.prefs.font.clone();
+            let current_name = self
+                .fonts
+                .iter()
+                .find(|choice| choice.id == font)
+                .map(|choice| {
+                    if choice.id.is_empty() {
+                        t.font_default
+                    } else {
+                        choice.name.as_str()
+                    }
+                })
+                .unwrap_or(t.font_default);
+            egui::ComboBox::from_id_salt("settings_font")
+                .selected_text(current_name)
+                .width(ui.available_width())
+                .height(220.0)
+                .show_ui(ui, |ui| {
+                    for choice in &self.fonts {
+                        let label = if choice.id.is_empty() {
                             t.font_default
                         } else {
                             choice.name.as_str()
-                        }
-                    })
-                    .unwrap_or(t.font_default);
-                egui::ComboBox::from_id_salt("settings_font")
-                    .selected_text(current_name)
-                    .width(280.0)
-                    .show_ui(ui, |ui| {
-                        for choice in &self.fonts {
-                            let label = if choice.id.is_empty() {
-                                t.font_default
-                            } else {
-                                choice.name.as_str()
-                            };
-                            ui.selectable_value(&mut font, choice.id.clone(), label);
-                        }
-                    });
-                if font != self.prefs.font {
-                    self.prefs.font = font;
-                    self.apply_editor_font(ctx);
-                }
+                        };
+                        ui.selectable_value(&mut font, choice.id.clone(), label);
+                    }
+                });
+            if font != self.prefs.font {
+                self.prefs.font = font;
+                self.apply_editor_font(ctx);
+            }
 
-                ui.add_space(8.0);
-                ui.label(t.font_size_label);
-                let mut size = self.prefs.size;
-                if ui.add(egui::Slider::new(&mut size, 10.0..=36.0)).changed() {
-                    self.prefs.size = size;
-                    self.apply_editor_font(ctx);
-                }
+            ui.add_space(10.0);
+            ui.label(t.font_size_label);
+            let mut size = self.prefs.size;
+            if ui
+                .add(egui::Slider::new(&mut size, 10.0..=36.0).integer())
+                .changed()
+            {
+                self.prefs.size = size;
+                self.apply_editor_font(ctx);
+            }
 
-                ui.add_space(12.0);
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
                 ui.weak(format!("RavnPad {}", update::CURRENT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button(t.ok).clicked() {
+                        close = true;
+                    }
+                });
             });
-        self.settings_open = open;
+        });
+        if close || modal.should_close() {
+            self.settings_open = false;
+        }
     }
 
     fn is_dirty(&self) -> bool {
@@ -308,8 +302,9 @@ impl RavnPad {
                 self.large = None;
             }
             Action::Open => {
-                self.dialog_kind = Some(DialogKind::Open);
-                self.file_dialog.pick_file();
+                if let Some(path) = self.pick_open_path() {
+                    self.open_path(path);
+                }
             }
             Action::Save => {
                 if self.large.is_some() {
@@ -317,14 +312,14 @@ impl RavnPad {
                 } else if self.path.is_some() {
                     self.write_current();
                 } else {
-                    self.start_save(None);
+                    self.start_save();
                 }
             }
             Action::SaveAs => {
                 if self.large.is_some() {
                     self.error = Some(AppError::TooLargeToEdit);
                 } else {
-                    self.start_save(None);
+                    self.start_save();
                 }
             }
             Action::Quit => {
@@ -537,10 +532,24 @@ impl RavnPad {
         action
     }
 
-    fn start_save(&mut self, then: Option<Action>) {
-        self.file_dialog.config_mut().default_file_name = self.display_name_for_save();
-        self.dialog_kind = Some(DialogKind::Save { then });
-        self.file_dialog.save_file();
+    fn start_save(&mut self) -> bool {
+        let Some(path) = self.pick_save_path() else {
+            return false;
+        };
+        self.path = Some(path);
+        self.write_current()
+    }
+
+    fn pick_open_path(&self) -> Option<PathBuf> {
+        native_dialog::pick_open(self.t().open, self.dialog_dir())
+    }
+
+    fn pick_save_path(&self) -> Option<PathBuf> {
+        native_dialog::pick_save(self.t().save_as, self.dialog_dir(), &self.display_name_for_save())
+    }
+
+    fn dialog_dir(&self) -> Option<&std::path::Path> {
+        self.path.as_deref().and_then(std::path::Path::parent)
     }
 
     fn display_name_for_save(&self) -> String {
@@ -719,7 +728,7 @@ impl eframe::App for RavnPad {
             });
         });
 
-        let dialog_busy = matches!(self.file_dialog.state(), DialogState::Open)
+        let dialog_busy = self.settings_open
             || self.confirm.is_some()
             || self.error.is_some()
             || !matches!(self.update, UpdateUi::Idle);
@@ -763,108 +772,49 @@ impl eframe::App for RavnPad {
         }
 
         preview_drop(ctx, t.drop_to_open);
-        fit_file_dialog(&mut self.file_dialog, ctx);
-        self.file_dialog.update(ctx);
 
-        if matches!(self.file_dialog.state(), DialogState::Cancelled) {
-            self.dialog_kind = None;
-        }
-
-        if let Some(path) = self.file_dialog.take_picked() {
-            match self.dialog_kind.take() {
-                Some(DialogKind::Open) | None => self.open_path(path),
-                Some(DialogKind::Save { then }) => {
-                    self.path = Some(path);
-                    if self.write_current()
-                        && let Some(then) = then
-                    {
-                        if matches!(then, Action::Quit) {
-                            ctx.send_viewport_cmd(ViewportCommand::Close);
-                        } else {
-                            self.execute(then);
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(pending) = self.confirm.clone() {
-            let mut decision = None;
-            egui::Window::new(t.unsaved_title)
-                .collapsible(false)
-                .resizable(false)
-                .constrain(true)
-                .max_size(dialog_max_size(ctx))
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(t.unsaved(&self.display_name()));
-                    ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button(t.save).clicked() {
-                            decision = Some(ConfirmChoice::Save);
-                        }
-                        if ui.button(t.dont_save).clicked() {
-                            decision = Some(ConfirmChoice::Discard);
-                        }
-                        if ui.button(t.cancel).clicked() {
-                            decision = Some(ConfirmChoice::Cancel);
-                        }
-                    });
-                });
-
-            if let Some(choice) = decision {
-                self.confirm = None;
-                match choice {
-                    ConfirmChoice::Save => {
-                        if self.path.is_some() {
-                            if self.write_current() {
-                                if matches!(pending, Action::Quit) {
-                                    ctx.send_viewport_cmd(ViewportCommand::Close);
-                                } else {
-                                    self.execute(pending);
-                                }
-                            }
-                        } else {
-                            self.start_save(Some(pending));
-                        }
-                    }
-                    ConfirmChoice::Discard => {
-                        self.saved_text.clone_from(&self.text);
+        if let Some(pending) = self.confirm.take() {
+            match native_dialog::unsaved(
+                t.unsaved_title,
+                &t.unsaved(&self.display_name()),
+                t.save,
+                t.dont_save,
+                t.cancel,
+            ) {
+                native_dialog::Confirm::Save => {
+                    let saved = if self.path.is_some() {
+                        self.write_current()
+                    } else {
+                        self.start_save()
+                    };
+                    if saved {
                         if matches!(pending, Action::Quit) {
                             ctx.send_viewport_cmd(ViewportCommand::Close);
                         } else {
                             self.execute(pending);
                         }
                     }
-                    ConfirmChoice::Cancel => {}
                 }
+                native_dialog::Confirm::Discard => {
+                    self.saved_text.clone_from(&self.text);
+                    if matches!(pending, Action::Quit) {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    } else {
+                        self.execute(pending);
+                    }
+                }
+                native_dialog::Confirm::Cancel => {}
             }
         }
 
-        if let Some(error) = &self.error {
+        if let Some(error) = self.error.take() {
             let message = match error {
-                AppError::File(err) => t.file_error(err),
-                AppError::Save(err) => t.save_error(err),
+                AppError::File(err) => t.file_error(&err),
+                AppError::Save(err) => t.save_error(&err),
                 AppError::TooLargeToEdit => t.too_large_edit.to_owned(),
                 AppError::DropTooLarge => t.drop_too_large.to_owned(),
             };
-            let mut close = false;
-            egui::Window::new(t.error_title)
-                .collapsible(false)
-                .resizable(false)
-                .constrain(true)
-                .max_size(dialog_max_size(ctx))
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(message);
-                    ui.add_space(8.0);
-                    if ui.button(t.ok).clicked() {
-                        close = true;
-                    }
-                });
-            if close {
-                self.error = None;
-            }
+            native_dialog::error(t.error_title, &message);
         }
 
         if action.is_none() {
@@ -897,12 +847,6 @@ impl eframe::App for RavnPad {
             self.last_title = title;
         }
     }
-}
-
-enum ConfirmChoice {
-    Save,
-    Discard,
-    Cancel,
 }
 
 enum UpdateUi {
@@ -1006,16 +950,6 @@ fn dialog_max_size(ctx: &egui::Context) -> egui::Vec2 {
     let size = ctx.content_rect().size();
     const PAD: f32 = 16.0;
     egui::vec2((size.x - PAD).max(120.0), (size.y - PAD).max(100.0))
-}
-
-fn fit_file_dialog(dialog: &mut FileDialog, ctx: &egui::Context) {
-    let max = dialog_max_size(ctx);
-    let cfg = dialog.config_mut();
-    cfg.max_size = Some(max);
-    cfg.min_size = egui::vec2(max.x.min(340.0), max.y.min(170.0));
-    cfg.default_size = egui::vec2(max.x.min(650.0), max.y.min(370.0));
-    cfg.anchor = Some((Align2::CENTER_CENTER, egui::Vec2::ZERO));
-    cfg.show_left_panel = max.x >= 460.0;
 }
 
 fn preview_drop(ctx: &egui::Context, message: &str) {
