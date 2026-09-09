@@ -1,6 +1,6 @@
 [package]
 name = "ravnpad"
-version = "1.2.7"
+version = "1.2.8"
 edition = "2024"
 rust-version = "1.88"
 description = "A simple UTF-8 notepad"
@@ -29,7 +29,6 @@ winit = { version = "0.30", default-features = false, features = ["x11"] }
 icns = "0.3"
 ico = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
-resvg = "0.45"
 winresource = "0.1"
 
 [profile.release]
