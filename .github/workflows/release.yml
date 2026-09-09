@@ -1,6 +1,8 @@
 name: Release
 
 on:
+  pull_request:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -19,10 +21,10 @@ jobs:
           - os: windows-latest
             name: windows-x86_64
             artifact: ravnpad-windows-x86_64.zip
-          - os: macos-latest
+          - os: macos-15
             name: macos-aarch64
             artifact: ravnpad-macos-aarch64.zip
-          - os: macos-13
+          - os: macos-15-intel
             name: macos-x86_64
             artifact: ravnpad-macos-x86_64.zip
 
@@ -32,7 +34,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Package Windows
         if: runner.os == 'Windows'
@@ -46,9 +48,27 @@ jobs:
           cp target/release/ravnpad RavnPad.app/Contents/MacOS/ravnpad
           chmod +x RavnPad.app/Contents/MacOS/ravnpad
           cp packaging/macos/Info.plist RavnPad.app/Contents/Info.plist
-          zip -r "${{ matrix.artifact }}" RavnPad.app
+          # Sign the complete bundle after all files have been placed.
+          # "-" is a free ad hoc identity, not a Developer ID certificate.
+          codesign --force --sign - RavnPad.app
+          codesign --verify --deep --strict --verbose=4 RavnPad.app
+          ditto -c -k --sequesterRsrc --keepParent RavnPad.app "${{ matrix.artifact }}"
+
+          # Verify the actual deliverable after a ZIP round trip.
+          verify_dir="$(mktemp -d)"
+          ditto -x -k "${{ matrix.artifact }}" "$verify_dir"
+          codesign --verify --deep --strict --verbose=4 "$verify_dir/RavnPad.app"
+          test -x "$verify_dir/RavnPad.app/Contents/MacOS/ravnpad"
+          rm -rf "$verify_dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
 
       - uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         with:
           files: ${{ matrix.artifact }}
           generate_release_notes: true
@@ -56,6 +76,6 @@ jobs:
             Prebuilt binaries for RavnPad ${{ github.ref_name }}.
 
             - **Windows:** unzip and run `ravnpad.exe`
-            - **macOS:** unzip `RavnPad.app`. The build is unsigned, so the first time you may need to right-click the app and choose **Open**.
+            - **macOS:** unzip `RavnPad.app`. The app is ad hoc signed, but not Apple-notarized. Gatekeeper may block the first launch. See the [macOS installation instructions](https://github.com/robbestad/ravnpad/blob/${{ github.ref_name }}/README.md#macos) for manual approval and troubleshooting.
 
             Apple Silicon: `ravnpad-macos-aarch64.zip`. Intel: `ravnpad-macos-x86_64.zip`.
