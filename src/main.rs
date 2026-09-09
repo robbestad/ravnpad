@@ -11,6 +11,7 @@ use egui_file_dialog::{DialogState, FileDialog};
 
 #[cfg(windows)]
 mod associate;
+mod large;
 
 const APP_NAME: &str = "RavnPad";
 
@@ -87,6 +88,7 @@ struct RavnPad {
     text: String,
     saved_text: String,
     path: Option<PathBuf>,
+    large: Option<large::LargeView>,
     last_title: String,
     last_size: egui::Vec2,
     file_dialog: FileDialog,
@@ -113,6 +115,7 @@ impl RavnPad {
             text: String::new(),
             saved_text: String::new(),
             path: None,
+            large: None,
             last_title: String::new(),
             last_size: egui::Vec2::ZERO,
             file_dialog: FileDialog::new()
@@ -124,14 +127,7 @@ impl RavnPad {
         };
 
         if let Some(path) = initial {
-            match load_text(&path) {
-                Ok(text) => {
-                    app.text = text;
-                    app.saved_text.clone_from(&app.text);
-                    app.path = Some(path);
-                }
-                Err(message) => app.error = Some(message),
-            }
+            app.open_path(path);
         }
 
         app
@@ -172,24 +168,34 @@ impl RavnPad {
                 self.text.clear();
                 self.saved_text.clear();
                 self.path = None;
+                self.large = None;
             }
             Action::Open => {
                 self.dialog_kind = Some(DialogKind::Open);
                 self.file_dialog.pick_file();
             }
             Action::Save => {
-                if self.path.is_some() {
+                if self.large.is_some() {
+                    self.error = Some(large::LARGE_SAVE_ERROR.to_owned());
+                } else if self.path.is_some() {
                     self.write_current();
                 } else {
                     self.start_save(None);
                 }
             }
-            Action::SaveAs => self.start_save(None),
+            Action::SaveAs => {
+                if self.large.is_some() {
+                    self.error = Some(large::LARGE_SAVE_ERROR.to_owned());
+                } else {
+                    self.start_save(None);
+                }
+            }
             Action::Quit => {
                 // Close is sent from the caller that has Context.
             }
             Action::OpenPath(path) => self.open_path(path),
             Action::OpenBytes(text) => {
+                self.large = None;
                 self.text = text;
                 self.saved_text.clone_from(&self.text);
                 self.path = None;
@@ -214,10 +220,17 @@ impl RavnPad {
     }
 
     fn open_path(&mut self, path: PathBuf) {
-        match load_text(&path) {
-            Ok(text) => {
+        match large::open(&path) {
+            Ok(large::Opened::Edit(text)) => {
+                self.large = None;
                 self.text = text;
                 self.saved_text.clone_from(&self.text);
+                self.path = Some(path);
+            }
+            Ok(large::Opened::View(view)) => {
+                self.text.clear();
+                self.saved_text.clear();
+                self.large = Some(view);
                 self.path = Some(path);
             }
             Err(message) => self.error = Some(message),
@@ -225,6 +238,10 @@ impl RavnPad {
     }
 
     fn write_current(&mut self) -> bool {
+        if self.large.is_some() {
+            self.error = Some(large::LARGE_SAVE_ERROR.to_owned());
+            return false;
+        }
         let Some(path) = &self.path else {
             return false;
         };
@@ -264,11 +281,19 @@ impl RavnPad {
         if let Some(path) = file.path {
             Some(Action::OpenPath(path))
         } else if let Some(bytes) = file.bytes {
-            match String::from_utf8(bytes.to_vec()) {
-                Ok(text) => Some(Action::OpenBytes(text)),
-                Err(_) => {
-                    self.error = Some("Filen er ikke gyldig UTF-8-tekst.".to_owned());
-                    None
+            if bytes.len() as u64 > large::EDIT_LIMIT {
+                self.error = Some(
+                    "Filen er for stor til å åpnes via dra-og-slipp. Åpne den fra disk i stedet."
+                        .to_owned(),
+                );
+                None
+            } else {
+                match String::from_utf8(bytes.to_vec()) {
+                    Ok(text) => Some(Action::OpenBytes(text)),
+                    Err(_) => {
+                        self.error = Some("Filen er ikke gyldig UTF-8-tekst.".to_owned());
+                        None
+                    }
                 }
             }
         } else {
@@ -297,12 +322,14 @@ impl eframe::App for RavnPad {
                         action = Some(Action::Open);
                     }
                     ui.separator();
-                    if menu_item(ui, "Lagre", "Ctrl+S") {
-                        action = Some(Action::Save);
-                    }
-                    if menu_item(ui, "Lagre som…", "Ctrl+Shift+S") {
-                        action = Some(Action::SaveAs);
-                    }
+                    ui.add_enabled_ui(self.large.is_none(), |ui| {
+                        if menu_item(ui, "Lagre", "Ctrl+S") {
+                            action = Some(Action::Save);
+                        }
+                        if menu_item(ui, "Lagre som…", "Ctrl+Shift+S") {
+                            action = Some(Action::SaveAs);
+                        }
+                    });
                     ui.separator();
                     if menu_item(ui, "Avslutt", "Ctrl+Q") {
                         action = Some(Action::Quit);
@@ -320,7 +347,11 @@ impl eframe::App for RavnPad {
                     .unwrap_or_else(|| "Uten tittel".to_owned());
                 ui.label(path_label);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(format!("{} tegn", self.text.chars().count()));
+                    if let Some(view) = &self.large {
+                        ui.label(view.status());
+                    } else {
+                        ui.label(format!("{} tegn", self.text.chars().count()));
+                    }
                 });
             });
         });
@@ -330,33 +361,37 @@ impl eframe::App for RavnPad {
             || self.error.is_some();
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let available = ui.available_size();
-            let row_height = ui.text_style_height(&TextStyle::Monospace);
-            let min_rows = ((available.y / row_height).floor() as usize).max(1);
+            if let Some(view) = &mut self.large {
+                view.show(ui, dialog_busy);
+            } else {
+                let available = ui.available_size();
+                let row_height = ui.text_style_height(&TextStyle::Monospace);
+                let min_rows = ((available.y / row_height).floor() as usize).max(1);
 
-            egui::ScrollArea::vertical()
-                .id_salt("editor_scroll")
-                .auto_shrink([false, false])
-                .scroll_source(if dialog_busy {
-                    ScrollSource::NONE
-                } else {
-                    ScrollSource {
-                        scroll_bar: true,
-                        drag: false,
-                        mouse_wheel: true,
-                    }
-                })
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.text)
-                            .id(egui::Id::new("editor"))
-                            .font(TextStyle::Monospace)
-                            .desired_width(ui.available_width())
-                            .desired_rows(min_rows)
-                            .lock_focus(!dialog_busy)
-                            .interactive(!dialog_busy),
-                    );
-                });
+                egui::ScrollArea::vertical()
+                    .id_salt("editor_scroll")
+                    .auto_shrink([false, false])
+                    .scroll_source(if dialog_busy {
+                        ScrollSource::NONE
+                    } else {
+                        ScrollSource {
+                            scroll_bar: true,
+                            drag: false,
+                            mouse_wheel: true,
+                        }
+                    })
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.text)
+                                .id(egui::Id::new("editor"))
+                                .font(TextStyle::Monospace)
+                                .desired_width(ui.available_width())
+                                .desired_rows(min_rows)
+                                .lock_focus(!dialog_busy)
+                                .interactive(!dialog_busy),
+                        );
+                    });
+            }
         });
 
         preview_drop(ctx);
@@ -499,9 +534,12 @@ fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
     clicked
 }
 
+#[cfg(test)]
 fn load_text(path: &std::path::Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|err| format!("Kunne ikke åpne filen:\n{err}"))?;
-    String::from_utf8(bytes).map_err(|_| "Filen er ikke gyldig UTF-8-tekst.".to_owned())
+    match large::open(path)? {
+        large::Opened::Edit(text) => Ok(text),
+        large::Opened::View(_) => Err(large::LARGE_SAVE_ERROR.to_owned()),
+    }
 }
 
 fn save_text(path: &std::path::Path, text: &str) -> Result<(), String> {

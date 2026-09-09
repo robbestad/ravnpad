@@ -1,9 +1,16 @@
 [package]
 name = "ravnpad"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
-description = "Enkel les/skriv-notisblokk"
+rust-version = "1.88"
+description = "A simple UTF-8 notepad"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/robbestad/ravnpad"
+homepage = "https://github.com/robbestad/ravnpad"
+keywords = ["notepad", "editor", "text", "gui", "egui"]
+categories = ["gui", "text-editors"]
+
 
 [dependencies]
 eframe = "0.33"
