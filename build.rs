@@ -4,15 +4,16 @@ use std::path::{Path, PathBuf};
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let svg_path = manifest.join("ravn-logo.svg");
-    println!("cargo:rerun-if-changed={}", svg_path.display());
+    let logo_path = manifest.join("ravn-logo.png");
+    println!("cargo:rerun-if-changed={}", logo_path.display());
 
-    let svg = fs::read(&svg_path).expect("kunne ikke lese ravn-logo.svg");
-    let rgba_256 = rasterize(&svg, 256);
-    save_png(&out.join("ravnpad-icon.png"), 256, &rgba_256);
-    write_ico(&svg, &out.join("ravnpad.ico"));
+    let src = image::open(&logo_path)
+        .expect("kunne ikke lese ravn-logo.png")
+        .to_rgba8();
+    save_png(&out.join("ravnpad-icon.png"), 256, &resize_rgba(&src, 256));
+    write_ico(&src, &out.join("ravnpad.ico"));
     let icns_path = out.join("ravnpad.icns");
-    write_icns(&svg, &icns_path);
+    write_icns(&src, &icns_path);
     // `OUT_DIR` is `target/{profile}/build/{pkg}-{hash}/out`. Copy next to the
     // binary so the macOS packaging step can pick it up without hashing.
     if let Some(profile_dir) = out.ancestors().nth(3) {
@@ -32,36 +33,8 @@ fn main() {
     }
 }
 
-fn rasterize(svg: &[u8], size: u32) -> Vec<u8> {
-    let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default())
-        .expect("ugyldig ravn-logo.svg");
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).expect("pixmap");
-    let svg_size = tree.size();
-    let pad = 0.90;
-    let scale = (size as f32 / svg_size.width().max(svg_size.height())) * pad;
-    let tx = (size as f32 - svg_size.width() * scale) / 2.0;
-    let ty = (size as f32 - svg_size.height() * scale) / 2.0;
-    let transform = resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, tx, ty);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    unpremultiply(pixmap.data())
-}
-
-fn unpremultiply(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len());
-    for px in data.chunks_exact(4) {
-        let a = px[3] as u32;
-        if a == 0 {
-            out.extend_from_slice(&[0, 0, 0, 0]);
-        } else if a == 255 {
-            out.extend_from_slice(px);
-        } else {
-            out.push(((px[0] as u32 * 255 + a / 2) / a) as u8);
-            out.push(((px[1] as u32 * 255 + a / 2) / a) as u8);
-            out.push(((px[2] as u32 * 255 + a / 2) / a) as u8);
-            out.push(px[3]);
-        }
-    }
-    out
+fn resize_rgba(src: &image::RgbaImage, size: u32) -> Vec<u8> {
+    image::imageops::resize(src, size, size, image::imageops::FilterType::Lanczos3).into_raw()
 }
 
 fn save_png(path: &Path, size: u32, rgba: &[u8]) {
@@ -71,10 +44,10 @@ fn save_png(path: &Path, size: u32, rgba: &[u8]) {
         .expect("kunne ikke lagre png-ikon");
 }
 
-fn write_icns(svg: &[u8], path: &Path) {
+fn write_icns(src: &image::RgbaImage, path: &Path) {
     let mut family = icns::IconFamily::new();
     for size in [16, 32, 48, 128, 256, 512, 1024] {
-        let rgba = rasterize(svg, size);
+        let rgba = resize_rgba(src, size);
         let image = icns::Image::from_data(icns::PixelFormat::RGBA, size, size, rgba)
             .unwrap_or_else(|err| panic!("icns {size}x{size}: {err}"));
         family
@@ -85,10 +58,10 @@ fn write_icns(svg: &[u8], path: &Path) {
     family.write(file).expect("kunne ikke skrive icns");
 }
 
-fn write_ico(svg: &[u8], path: &Path) {
+fn write_ico(src: &image::RgbaImage, path: &Path) {
     let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
     for size in [16, 24, 32, 48, 64, 128, 256] {
-        let rgba = rasterize(svg, size);
+        let rgba = resize_rgba(src, size);
         let image = ico::IconImage::from_rgba_data(size, size, rgba);
         dir.add_entry(ico::IconDirEntry::encode(&image).expect("ico-entry"));
     }
