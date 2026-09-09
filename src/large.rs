@@ -9,7 +9,6 @@ pub const EDIT_LIMIT: u64 = 2 * 1024 * 1024;
 
 const LOOKBACK: u64 = 256 * 1024;
 const MAX_WINDOW: usize = 256 * 1024;
-const MAX_LINE_CHARS: usize = 2000;
 const CHUNK: usize = 64 * 1024;
 
 pub enum Opened {
@@ -53,7 +52,7 @@ pub struct LargeView {
     pub size: u64,
     offset: u64,
     window: String,
-    prepared_for: Option<(u64, usize)>,
+    prepared_for: Option<(u64, usize, usize)>,
 }
 
 impl LargeView {
@@ -83,9 +82,13 @@ impl LargeView {
 
     pub fn show(&mut self, ui: &mut egui::Ui, dialog_busy: bool, cannot_read: &str) {
         let row_height = ui.text_style_height(&TextStyle::Monospace);
-        let rows = ((ui.available_height() / row_height).floor() as usize).max(1);
+        let height = ui.available_height();
+        let rows = ((height / row_height).floor() as usize).max(1);
+        let bar_w = 14.0;
+        let text_w = (ui.available_width() - bar_w).max(40.0);
+        let wrap_cols = wrap_columns(ui, text_w);
 
-        if let Err(err) = self.ensure_window(rows) {
+        if let Err(err) = self.ensure_window(rows, wrap_cols) {
             let message = match err {
                 FileError::Open(err) | FileError::Read(err) => format!("{cannot_read}:\n{err}"),
                 FileError::InvalidUtf8 | FileError::InvalidRtf => cannot_read.to_owned(),
@@ -95,14 +98,16 @@ impl LargeView {
         }
 
         if !dialog_busy {
-            self.handle_input(ui, rows, row_height, ui.rect_contains_pointer(ui.max_rect()));
+            self.handle_input(
+                ui,
+                rows,
+                wrap_cols,
+                row_height,
+                ui.rect_contains_pointer(ui.max_rect()),
+            );
         }
 
         ui.horizontal(|ui| {
-            let bar_w = 14.0;
-            let text_w = (ui.available_width() - bar_w).max(40.0);
-            let height = ui.available_height();
-
             ui.allocate_ui_with_layout(
                 egui::vec2(text_w, height),
                 Layout::top_down(Align::Min),
@@ -110,7 +115,8 @@ impl LargeView {
                     ui.set_clip_rect(ui.max_rect());
                     ui.add(
                         egui::Label::new(RichText::new(&self.window).monospace())
-                            .selectable(true),
+                            .selectable(true)
+                            .extend(),
                     );
                 },
             );
@@ -118,18 +124,25 @@ impl LargeView {
             if let Some(new_offset) = file_scrollbar(ui, self.offset, self.size, height) {
                 self.offset = new_offset;
                 self.prepared_for = None;
-                let _ = self.ensure_window(rows);
+                let _ = self.ensure_window(rows, wrap_cols);
             }
         });
     }
 
-    fn handle_input(&mut self, ui: &mut egui::Ui, rows: usize, row_height: f32, hovered: bool) {
+    fn handle_input(
+        &mut self,
+        ui: &mut egui::Ui,
+        rows: usize,
+        wrap_cols: usize,
+        row_height: f32,
+        hovered: bool,
+    ) {
         if hovered {
             let scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll_y.abs() >= 1.0 {
                 let lines = (scroll_y / row_height).round() as i64;
                 if lines != 0 {
-                    let _ = self.scroll_lines(-lines, rows);
+                    let _ = self.scroll_lines(-lines, rows, wrap_cols);
                 }
             }
         }
@@ -138,27 +151,27 @@ impl LargeView {
             input.key_pressed(egui::Key::PageDown)
                 || (input.key_pressed(egui::Key::ArrowDown) && input.modifiers.command)
         }) {
-            let _ = self.scroll_lines(rows as i64, rows);
+            let _ = self.scroll_lines(rows as i64, rows, wrap_cols);
         } else if ui.input(|input| {
             input.key_pressed(egui::Key::PageUp)
                 || (input.key_pressed(egui::Key::ArrowUp) && input.modifiers.command)
         }) {
-            let _ = self.scroll_lines(-(rows as i64), rows);
+            let _ = self.scroll_lines(-(rows as i64), rows, wrap_cols);
         } else if ui.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
-            let _ = self.scroll_lines(1, rows);
+            let _ = self.scroll_lines(1, rows, wrap_cols);
         } else if ui.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
-            let _ = self.scroll_lines(-1, rows);
+            let _ = self.scroll_lines(-1, rows, wrap_cols);
         } else if ui.input(|input| input.key_pressed(egui::Key::Home)) {
             self.offset = 0;
             self.prepared_for = None;
-            let _ = self.ensure_window(rows);
+            let _ = self.ensure_window(rows, wrap_cols);
         } else if ui.input(|input| input.key_pressed(egui::Key::End)) {
-            let _ = self.scroll_to_end(rows);
+            let _ = self.scroll_to_end(rows, wrap_cols);
         }
     }
 
-    fn ensure_window(&mut self, rows: usize) -> Result<(), FileError> {
-        if self.prepared_for == Some((self.offset, rows)) {
+    fn ensure_window(&mut self, rows: usize, wrap_cols: usize) -> Result<(), FileError> {
+        if self.prepared_for == Some((self.offset, rows, wrap_cols)) {
             return Ok(());
         }
         let mut file = File::open(&self.path).map_err(FileError::Read)?;
@@ -166,30 +179,43 @@ impl LargeView {
             .metadata()
             .map(|meta| meta.len())
             .unwrap_or(self.size);
-        self.offset = align_line_start(&mut file, self.offset, self.size).map_err(FileError::Read)?;
-        self.window = read_window(&mut file, self.offset, self.size, rows).map_err(FileError::Read)?;
-        self.prepared_for = Some((self.offset, rows));
+        self.offset = self.offset.min(self.size);
+        if self.offset > 0 {
+            self.offset = utf8_floor(&mut file, self.offset).map_err(FileError::Read)?;
+        }
+        self.window = read_window(&mut file, self.offset, self.size, rows, wrap_cols)
+            .map_err(FileError::Read)?;
+        self.prepared_for = Some((self.offset, rows, wrap_cols));
         Ok(())
     }
 
-    fn scroll_lines(&mut self, delta: i64, rows: usize) -> Result<(), FileError> {
+    fn scroll_lines(&mut self, delta: i64, rows: usize, wrap_cols: usize) -> Result<(), FileError> {
         if delta == 0 {
             return Ok(());
         }
         let mut file = File::open(&self.path).map_err(FileError::Read)?;
-        self.offset =
-            move_by_lines(&mut file, self.offset, self.size, delta).map_err(FileError::Read)?;
-        self.prepared_for = None;
-        self.ensure_window(rows)
-    }
-
-    fn scroll_to_end(&mut self, rows: usize) -> Result<(), FileError> {
-        let mut file = File::open(&self.path).map_err(FileError::Read)?;
-        self.offset = move_by_lines(&mut file, self.size, self.size, -(rows as i64))
+        self.offset = move_by_lines(&mut file, self.offset, self.size, delta, wrap_cols)
             .map_err(FileError::Read)?;
         self.prepared_for = None;
-        self.ensure_window(rows)
+        self.ensure_window(rows, wrap_cols)
     }
+
+    fn scroll_to_end(&mut self, rows: usize, wrap_cols: usize) -> Result<(), FileError> {
+        let mut file = File::open(&self.path).map_err(FileError::Read)?;
+        self.offset =
+            move_by_lines(&mut file, self.size, self.size, -(rows as i64), wrap_cols)
+                .map_err(FileError::Read)?;
+        self.prepared_for = None;
+        self.ensure_window(rows, wrap_cols)
+    }
+}
+
+fn wrap_columns(ui: &egui::Ui, text_w: f32) -> usize {
+    let font_id = TextStyle::Monospace.resolve(ui.style());
+    let char_w = ui
+        .fonts_mut(|fonts| fonts.glyph_width(&font_id, 'M'))
+        .max(1.0);
+    ((text_w / char_w).floor() as usize).max(8)
 }
 
 fn scrollbar_thumb_height(track: f32) -> f32 {
@@ -234,38 +260,32 @@ fn file_scrollbar(ui: &mut egui::Ui, offset: u64, size: u64, height: f32) -> Opt
     }
 }
 
-fn align_line_start(file: &mut File, offset: u64, size: u64) -> std::io::Result<u64> {
-    let offset = offset.min(size);
+fn utf8_floor(file: &mut File, offset: u64) -> std::io::Result<u64> {
     if offset == 0 {
         return Ok(0);
     }
-    let start = offset.saturating_sub(LOOKBACK);
-    file.seek(SeekFrom::Start(start))?;
-    let mut buf = vec![0u8; (offset - start) as usize];
-    let n = file.read(&mut buf)?;
-    buf.truncate(n);
-    if let Some(i) = buf.iter().rposition(|&b| b == b'\n') {
-        Ok(start + i as u64 + 1)
-    } else if start == 0 {
-        Ok(0)
-    } else {
-        utf8_floor(file, offset)
-    }
-}
-
-fn utf8_floor(file: &mut File, offset: u64) -> std::io::Result<u64> {
     let back = offset.min(3);
     file.seek(SeekFrom::Start(offset - back))?;
-    let mut buf = [0u8; 3];
-    let n = file.read(&mut buf[..back as usize])?;
-    let mut i = n;
-    while i > 0 && buf[i - 1] & 0xC0 == 0x80 {
+    let mut buf = [0u8; 4];
+    let n = file.read(&mut buf)?;
+    let at = back as usize;
+    if n <= at || buf[at] & 0xC0 != 0x80 {
+        return Ok(offset);
+    }
+    let mut i = at;
+    while i > 0 && buf[i] & 0xC0 == 0x80 {
         i -= 1;
     }
-    Ok(offset - (n - i) as u64)
+    Ok(offset - back + i as u64)
 }
 
-fn read_window(file: &mut File, start: u64, size: u64, rows: usize) -> std::io::Result<String> {
+fn read_window(
+    file: &mut File,
+    start: u64,
+    size: u64,
+    rows: usize,
+    wrap_cols: usize,
+) -> std::io::Result<String> {
     if start >= size {
         return Ok(String::new());
     }
@@ -276,13 +296,35 @@ fn read_window(file: &mut File, start: u64, size: u64, rows: usize) -> std::io::
     buf.truncate(n);
     skip_incomplete_tail(&mut buf);
 
-    let lossy = String::from_utf8_lossy(&buf);
+    let wrap_cols = wrap_cols.max(1);
     let mut out = String::new();
-    for (index, line) in lossy.split_inclusive('\n').enumerate() {
-        if index >= rows {
-            break;
+    let mut col = 0usize;
+    let mut lines = 0usize;
+    let mut i = 0usize;
+    while i < buf.len() && lines < rows {
+        match next_step(&buf, i) {
+            None => break,
+            Some(Step::Skip(w)) => i += w,
+            Some(Step::Char(ch, w)) => {
+                i += w;
+                if ch == '\n' {
+                    out.push('\n');
+                    col = 0;
+                    lines += 1;
+                } else {
+                    if col >= wrap_cols {
+                        lines += 1;
+                        if lines >= rows {
+                            break;
+                        }
+                        out.push('\n');
+                        col = 0;
+                    }
+                    out.push(ch);
+                    col += 1;
+                }
+            }
         }
-        push_display_line(&mut out, line);
     }
     Ok(out)
 }
@@ -318,100 +360,160 @@ fn utf8_width(lead: u8) -> usize {
     }
 }
 
-fn push_display_line(out: &mut String, line: &str) {
-    let newline = line.ends_with('\n');
-    let body = line.strip_suffix('\n').unwrap_or(line);
-    let body = body.strip_suffix('\r').unwrap_or(body);
-    let mut chars = body.chars();
-    for _ in 0..MAX_LINE_CHARS {
-        match chars.next() {
-            Some(ch) => out.push(ch),
-            None => {
-                if newline {
-                    out.push('\n');
-                }
-                return;
-            }
+enum Step {
+    Char(char, usize),
+    Skip(usize),
+}
+
+fn next_step(buf: &[u8], i: usize) -> Option<Step> {
+    let (ch, w) = decode_char(buf, i)?;
+    if ch == '\r' {
+        if buf.get(i + w) == Some(&b'\n') {
+            return Some(Step::Skip(w));
         }
+        return Some(Step::Char('\n', w));
     }
-    if chars.next().is_some() {
-        out.push('…');
+    Some(Step::Char(ch, w))
+}
+
+fn decode_char(buf: &[u8], i: usize) -> Option<(char, usize)> {
+    let first = *buf.get(i)?;
+    if first < 0x80 {
+        return Some((first as char, 1));
     }
-    if newline {
-        out.push('\n');
+    let width = utf8_width(first);
+    if width < 2 || i + width > buf.len() {
+        return Some(('\u{FFFD}', 1));
+    }
+    match std::str::from_utf8(&buf[i..i + width]) {
+        Ok(s) => Some((s.chars().next()?, width)),
+        Err(_) => Some(('\u{FFFD}', 1)),
     }
 }
 
-fn move_by_lines(file: &mut File, pos: u64, size: u64, delta: i64) -> std::io::Result<u64> {
+fn move_by_lines(
+    file: &mut File,
+    pos: u64,
+    size: u64,
+    delta: i64,
+    wrap_cols: usize,
+) -> std::io::Result<u64> {
+    let wrap_cols = wrap_cols.max(1);
     if delta > 0 {
-        scan_forward(file, pos, size, delta as u64)
+        scan_forward(file, pos, size, delta as u64, wrap_cols)
     } else if delta < 0 {
-        scan_backward(file, pos, (-delta) as u64)
+        scan_backward(file, pos, (-delta) as u64, wrap_cols)
     } else {
         Ok(pos.min(size))
     }
 }
 
-fn scan_forward(file: &mut File, mut pos: u64, size: u64, mut lines: u64) -> std::io::Result<u64> {
-    let origin = pos;
+fn scan_forward(
+    file: &mut File,
+    pos: u64,
+    size: u64,
+    lines: u64,
+    wrap_cols: usize,
+) -> std::io::Result<u64> {
+    if lines == 0 || pos >= size {
+        return Ok(pos.min(size));
+    }
+    let cap = ((lines as usize).saturating_mul(wrap_cols).saturating_mul(4))
+        .saturating_add(CHUNK)
+        .min(MAX_WINDOW)
+        .min((size - pos) as usize);
     file.seek(SeekFrom::Start(pos))?;
-    let mut buf = [0u8; CHUNK];
-    while lines > 0 && pos < size {
-        if pos - origin >= MAX_WINDOW as u64 {
-            return Ok(origin.saturating_add(MAX_WINDOW as u64).min(size));
-        }
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        for (i, byte) in buf[..n].iter().enumerate() {
-            if *byte == b'\n' {
-                lines -= 1;
-                if lines == 0 {
-                    return Ok((pos + i as u64 + 1).min(size));
+    let mut buf = vec![0u8; cap];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    skip_incomplete_tail(&mut buf);
+
+    let mut left = lines;
+    let mut col = 0usize;
+    let mut i = 0usize;
+    while i < buf.len() && left > 0 {
+        match next_step(&buf, i) {
+            None => break,
+            Some(Step::Skip(w)) => i += w,
+            Some(Step::Char(ch, w)) => {
+                i += w;
+                if ch == '\n' {
+                    left -= 1;
+                    col = 0;
+                } else {
+                    col += 1;
+                    if col >= wrap_cols {
+                        left -= 1;
+                        col = 0;
+                    }
                 }
             }
         }
-        pos += n as u64;
     }
-    Ok(pos.min(size))
+    Ok((pos + i as u64).min(size))
 }
 
-fn scan_backward(file: &mut File, pos: u64, mut lines: u64) -> std::io::Result<u64> {
+fn scan_backward(
+    file: &mut File,
+    pos: u64,
+    lines: u64,
+    wrap_cols: usize,
+) -> std::io::Result<u64> {
     if lines == 0 {
         return Ok(pos);
     }
     if pos == 0 {
         return Ok(0);
     }
-    // Search [0, pos-1) so a newline that already ends the previous line
-    // (when `pos` is a line start) is not counted as a step.
-    let origin = pos;
-    let mut end = pos - 1;
-    while lines > 0 && end > 0 {
-        if origin - end >= MAX_WINDOW as u64 {
-            return Ok(origin.saturating_sub(MAX_WINDOW as u64));
+    let cap = ((lines as usize).saturating_mul(wrap_cols).saturating_mul(4))
+        .saturating_add(CHUNK)
+        .min(LOOKBACK as usize);
+    let start = pos.saturating_sub(cap as u64);
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = vec![0u8; (pos - start) as usize];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    let mut i = 0usize;
+    if start > 0 {
+        while i < buf.len() && i < 3 && buf[i] & 0xC0 == 0x80 {
+            i += 1;
         }
-        let start = end.saturating_sub(CHUNK as u64);
-        let len = (end - start) as usize;
-        file.seek(SeekFrom::Start(start))?;
-        let mut buf = vec![0u8; len];
-        let n = file.read(&mut buf)?;
-        buf.truncate(n);
-        for (i, byte) in buf.iter().enumerate().rev() {
-            if *byte == b'\n' {
-                lines -= 1;
-                if lines == 0 {
-                    return Ok(start + i as u64 + 1);
+    }
+    skip_incomplete_tail(&mut buf);
+
+    let mut row_starts = vec![start + i as u64];
+    let mut col = 0usize;
+    while i < buf.len() {
+        if start + i as u64 >= pos {
+            break;
+        }
+        match next_step(&buf, i) {
+            None => break,
+            Some(Step::Skip(w)) => i += w,
+            Some(Step::Char(ch, w)) => {
+                i += w;
+                let next_abs = start + i as u64;
+                if ch == '\n' {
+                    col = 0;
+                    if next_abs <= pos {
+                        row_starts.push(next_abs);
+                    }
+                } else {
+                    col += 1;
+                    if col >= wrap_cols {
+                        col = 0;
+                        if next_abs <= pos {
+                            row_starts.push(next_abs);
+                        }
+                    }
                 }
             }
         }
-        if start == 0 {
-            return Ok(0);
-        }
-        end = start;
     }
-    Ok(0)
+
+    let idx = row_starts.len().saturating_sub(1);
+    let target = idx.saturating_sub(lines as usize);
+    Ok(row_starts[target])
 }
 
 pub fn format_size(bytes: u64) -> String {
@@ -477,14 +579,14 @@ mod tests {
     }
 
     #[test]
-    fn align_snaps_to_previous_newline() {
-        let path = temp("align.txt");
-        write_all(&path, b"aaa\nbbbb\ncc");
+    fn utf8_floor_does_not_rewind_complete_chars() {
+        let path = temp("utf8-floor.txt");
+        write_all(&path, b"abc\xc3\xa9xyz");
         let mut file = File::open(&path).unwrap();
-        let size = 11;
-        assert_eq!(align_line_start(&mut file, 0, size).unwrap(), 0);
-        assert_eq!(align_line_start(&mut file, 5, size).unwrap(), 4);
-        assert_eq!(align_line_start(&mut file, 10, size).unwrap(), 9);
+        assert_eq!(utf8_floor(&mut file, 0).unwrap(), 0);
+        assert_eq!(utf8_floor(&mut file, 3).unwrap(), 3);
+        assert_eq!(utf8_floor(&mut file, 4).unwrap(), 3);
+        assert_eq!(utf8_floor(&mut file, 5).unwrap(), 5);
         let _ = fs::remove_file(path);
     }
 
@@ -494,12 +596,13 @@ mod tests {
         write_all(&path, b"one\ntwo\nthree\n");
         let mut file = File::open(&path).unwrap();
         let size = 14;
-        let two = scan_forward(&mut file, 0, size, 1).unwrap();
+        let wrap = 1000;
+        let two = scan_forward(&mut file, 0, size, 1, wrap).unwrap();
         assert_eq!(two, 4);
-        let three = scan_forward(&mut file, two, size, 1).unwrap();
+        let three = scan_forward(&mut file, two, size, 1, wrap).unwrap();
         assert_eq!(three, 8);
-        assert_eq!(scan_backward(&mut file, three, 1).unwrap(), 4);
-        assert_eq!(scan_backward(&mut file, two, 1).unwrap(), 0);
+        assert_eq!(scan_backward(&mut file, three, 1, wrap).unwrap(), 4);
+        assert_eq!(scan_backward(&mut file, two, 1, wrap).unwrap(), 0);
         let _ = fs::remove_file(path);
     }
 
@@ -508,35 +611,68 @@ mod tests {
         let path = temp("window.txt");
         write_all(&path, b"a\nb\nc\nd\n");
         let mut file = File::open(&path).unwrap();
-        let text = read_window(&mut file, 0, 8, 2).unwrap();
+        let text = read_window(&mut file, 0, 8, 2, 1000).unwrap();
         assert_eq!(text, "a\nb\n");
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn long_lines_are_truncated_in_the_window() {
+    fn long_lines_wrap_to_fill_rows() {
         let path = temp("long.txt");
-        let mut data = vec![b'z'; MAX_LINE_CHARS + 50];
-        data.push(b'\n');
+        let data = vec![b'z'; 50];
         write_all(&path, &data);
         let mut file = File::open(&path).unwrap();
-        let text = read_window(&mut file, 0, data.len() as u64, 1).unwrap();
-        assert!(text.ends_with("…\n"));
-        assert_eq!(text.chars().count(), MAX_LINE_CHARS + 2);
+        let text = read_window(&mut file, 0, data.len() as u64, 3, 10).unwrap();
+        assert_eq!(text, "zzzzzzzzzz\nzzzzzzzzzz\nzzzzzzzzzz");
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn scan_without_newlines_caps_distance() {
+    fn first_physical_line_does_not_hide_later_lines() {
+        let path = temp("wrap-then-lines.txt");
+        let mut data = vec![b'a'; 200];
+        data.extend_from_slice(b"\nsecond\nthird\n");
+        write_all(&path, &data);
+        let mut file = File::open(&path).unwrap();
+        let text = read_window(&mut file, 0, data.len() as u64, 6, 80).unwrap();
+        assert!(text.contains("second"), "{text:?}");
+        assert!(text.contains("third"), "{text:?}");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_without_newlines_moves_by_wrap() {
         let path = temp("nonewline.txt");
         let data = vec![b'x'; MAX_WINDOW + CHUNK];
         write_all(&path, &data);
         let mut file = File::open(&path).unwrap();
         let size = data.len() as u64;
-        let pos = scan_forward(&mut file, 0, size, 1).unwrap();
-        assert_eq!(pos, MAX_WINDOW as u64);
-        let back = scan_backward(&mut file, size, 1).unwrap();
-        assert_eq!(size - back, MAX_WINDOW as u64);
+        let wrap = 80;
+        let pos = scan_forward(&mut file, 0, size, 1, wrap).unwrap();
+        assert_eq!(pos, wrap as u64);
+        assert_eq!(scan_backward(&mut file, pos, 1, wrap).unwrap(), 0);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn giant_line_scroll_does_not_snap_home() {
+        let path = temp("issue3.txt");
+        let data: Vec<u8> = (0..LOOKBACK as usize + 4096)
+            .map(|i| b'a' + (i % 26) as u8)
+            .collect();
+        write_all(&path, &data);
+        let mut view = LargeView::open(&path, data.len() as u64).unwrap();
+        let wrap = 80usize;
+        let rows = 20usize;
+        view.ensure_window(rows, wrap).unwrap();
+        assert_eq!(view.offset, 0);
+        view.scroll_lines(1, rows, wrap).unwrap();
+        assert_eq!(view.offset, wrap as u64);
+        let first = view.window.clone();
+        view.scroll_lines(1, rows, wrap).unwrap();
+        assert_eq!(view.offset, (wrap * 2) as u64);
+        assert_ne!(view.window, first);
+        assert_eq!(view.window.as_bytes()[0], data[wrap * 2]);
         let _ = fs::remove_file(path);
     }
 
