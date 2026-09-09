@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x86_64
+            artifact: ravnpad-windows-x86_64.zip
+          - os: macos-latest
+            name: macos-aarch64
+            artifact: ravnpad-macos-aarch64.zip
+          - os: macos-13
+            name: macos-x86_64
+            artifact: ravnpad-macos-x86_64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/ravnpad.exe -DestinationPath ${{ matrix.artifact }}
+
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p RavnPad.app/Contents/MacOS
+          cp target/release/ravnpad RavnPad.app/Contents/MacOS/ravnpad
+          chmod +x RavnPad.app/Contents/MacOS/ravnpad
+          cp packaging/macos/Info.plist RavnPad.app/Contents/Info.plist
+          zip -r "${{ matrix.artifact }}" RavnPad.app
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
+          generate_release_notes: true
+          body: |
+            Prebuilt binaries for RavnPad ${{ github.ref_name }}.
+
+            - **Windows:** unzip and run `ravnpad.exe`
+            - **macOS:** unzip `RavnPad.app`. The build is unsigned, so the first time you may need to right-click the app and choose **Open**.
+
+            Apple Silicon: `ravnpad-macos-aarch64.zip`. Intel: `ravnpad-macos-x86_64.zip`.
