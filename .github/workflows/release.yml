@@ -44,10 +44,12 @@ jobs:
       - name: Package macOS
         if: runner.os == 'macOS'
         run: |
-          mkdir -p RavnPad.app/Contents/MacOS
+          mkdir -p RavnPad.app/Contents/MacOS RavnPad.app/Contents/Resources
           cp target/release/ravnpad RavnPad.app/Contents/MacOS/ravnpad
           chmod +x RavnPad.app/Contents/MacOS/ravnpad
           cp packaging/macos/Info.plist RavnPad.app/Contents/Info.plist
+          test -f target/release/ravnpad.icns
+          cp target/release/ravnpad.icns RavnPad.app/Contents/Resources/RavnPad.icns
           # Sign the complete bundle after all files have been placed.
           # "-" is a free ad hoc identity, not a Developer ID certificate.
           codesign --force --sign - RavnPad.app
@@ -59,6 +61,7 @@ jobs:
           ditto -x -k "${{ matrix.artifact }}" "$verify_dir"
           codesign --verify --deep --strict --verbose=4 "$verify_dir/RavnPad.app"
           test -x "$verify_dir/RavnPad.app/Contents/MacOS/ravnpad"
+          test -f "$verify_dir/RavnPad.app/Contents/Resources/RavnPad.icns"
           rm -rf "$verify_dir"
 
       - uses: actions/upload-artifact@v4

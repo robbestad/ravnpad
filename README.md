@@ -15,6 +15,10 @@ cargo install ravnpad
 Download the ZIP for your Mac: `aarch64` for Apple Silicon, or `x86_64` for Intel.
 Extract it and move `RavnPad.app` to Applications.
 
+Finder and Dock use the RavnPress logo from `RavnPad.app/Contents/Resources`.
+The window icon is the same logo, loaded at runtime. Ad hoc signing does not
+remove the icon.
+
 The app uses a free **ad hoc signature**. This checks bundle integrity, but does
 not identify the developer to Apple and is **not notarization**. No paid Apple
 account is needed to build these releases. Gatekeeper may still block an app
