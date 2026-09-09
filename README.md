@@ -21,7 +21,9 @@ På en Windows-maskin med Rust installert:
 cargo build --release
 ```
 
-Resultatet ligger i `target\release\textpad.exe`. Release-bygg skjuler konsollvinduet.
+Resultatet ligger i `target\release\ravnpad.exe`. Release-bygg skjuler konsollvinduet. Programikonet er RavnPress-logoen.
+
+På Windows registrerer RavnPad seg som program for tekstfiler (`.txt`, `.text`, `.log`, `.md`) ved oppstart, uten administrator. Dobbeltklikk åpner filen i RavnPad. Hvis Windows allerede har en annen standardapp, velg RavnPad under **Åpne med**.
 
 ## Bruk
 
@@ -35,4 +37,6 @@ Resultatet ligger i `target\release\textpad.exe`. Release-bygg skjuler konsollvi
 
 Ulagrede endringer spør før Ny, Åpne, Avslutt og dra-og-slipp. Bare UTF-8 støttes.
 
-Åpne en fil fra kommandolinjen med `textpad fil.txt` (eller dra filen på programikonet). Dra-og-slipp inn i vinduet virker på Windows og på Linux via X11.
+Åpne en fil fra kommandolinjen med `ravnpad fil.txt` (eller dra filen på programikonet). Dra-og-slipp inn i vinduet virker på Windows og på Linux via X11.
+
+Ravn-logoen er et registrert varemerke.
