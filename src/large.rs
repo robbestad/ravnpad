@@ -15,6 +15,7 @@ const CHUNK: usize = 64 * 1024;
 pub enum Opened {
     Edit(String),
     View(LargeView),
+    Converted { text: String, txt_path: PathBuf },
 }
 
 #[derive(Debug)]
@@ -22,10 +23,22 @@ pub enum FileError {
     Open(std::io::Error),
     Read(std::io::Error),
     InvalidUtf8,
+    InvalidRtf,
 }
 
 pub fn open(path: &Path) -> Result<Opened, FileError> {
     let size = fs::metadata(path).map_err(FileError::Open)?.len();
+    if crate::rtf::path_is_rtf(path) {
+        if size > EDIT_LIMIT {
+            return Err(FileError::InvalidRtf);
+        }
+        let bytes = fs::read(path).map_err(FileError::Open)?;
+        let text = crate::rtf::to_text(&bytes).map_err(|_| FileError::InvalidRtf)?;
+        return Ok(Opened::Converted {
+            text,
+            txt_path: path.with_extension("txt"),
+        });
+    }
     if size > EDIT_LIMIT {
         Ok(Opened::View(LargeView::open(path, size)?))
     } else {
@@ -75,7 +88,7 @@ impl LargeView {
         if let Err(err) = self.ensure_window(rows) {
             let message = match err {
                 FileError::Open(err) | FileError::Read(err) => format!("{cannot_read}:\n{err}"),
-                FileError::InvalidUtf8 => cannot_read.to_owned(),
+                FileError::InvalidUtf8 | FileError::InvalidRtf => cannot_read.to_owned(),
             };
             ui.colored_label(Color32::from_rgb(160, 40, 40), message);
             return;
@@ -418,12 +431,26 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn rtf_opens_converted_with_txt_path() {
+        let path = temp("note.rtf");
+        write_all(&path, br"{\rtf1\ansi\pard Hello {\b world}\par}");
+        match open(&path).unwrap() {
+            Opened::Converted { text, txt_path } => {
+                assert_eq!(text, "Hello world");
+                assert_eq!(txt_path.extension().and_then(|e| e.to_str()), Some("txt"));
+            }
+            _ => panic!("expected converted rtf"),
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn small_files_open_for_edit() {
         let path = temp("small.txt");
         write_all(&path, b"abc\n");
         match open(&path).unwrap() {
             Opened::Edit(text) => assert_eq!(text, "abc\n"),
-            Opened::View(_) => panic!("expected edit"),
+            Opened::View(_) | Opened::Converted { .. } => panic!("expected edit"),
         }
         let _ = fs::remove_file(path);
     }
@@ -435,7 +462,7 @@ mod tests {
         write_all(&path, &data);
         match open(&path).unwrap() {
             Opened::View(view) => assert_eq!(view.size, EDIT_LIMIT + 8),
-            Opened::Edit(_) => panic!("expected view"),
+            Opened::Edit(_) | Opened::Converted { .. } => panic!("expected view"),
         }
         let _ = fs::remove_file(path);
     }
