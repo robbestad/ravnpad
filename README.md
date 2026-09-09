@@ -1,42 +1,48 @@
 # RavnPad
 
-Enkel les/skriv-notisblokk. Åpne, rediger og lagre UTF-8-tekst. Ingenting mer.
+A simple UTF-8 notepad. Open, edit, and save text. Nothing more.
 
-## Krav
+## Install
 
-- [Rust](https://rustup.rs/) (1.85 eller nyere)
-- På Linux: vanlige GUI-biblioteker (`libxcb`, `libxkbcommon`, GTK 3 for fil-dialoger)
+```bash
+cargo install ravnpad
+```
 
-## Kjør
+## Requirements
+
+- [Rust](https://rustup.rs/) 1.88 or newer
+- On Linux: common GUI libraries (`libxcb`, `libxkbcommon`, GTK 3 for file dialogs)
+
+## Run
 
 ```bash
 cargo run --release
 ```
 
-## Bygg Windows-exe
+## Build a Windows exe
 
-På en Windows-maskin med Rust installert:
+On a Windows machine with Rust installed:
 
 ```bat
 cargo build --release
 ```
 
-Resultatet ligger i `target\release\ravnpad.exe`. Release-bygg skjuler konsollvinduet. Programikonet er RavnPress-logoen.
+The binary is `target\release\ravnpad.exe`. Release builds hide the console window. The app icon is the RavnPress logo.
 
-På Windows registrerer RavnPad seg som program for tekstfiler (`.txt`, `.text`, `.log`, `.md`) ved oppstart, uten administrator. Dobbeltklikk åpner filen i RavnPad. Hvis Windows allerede har en annen standardapp, velg RavnPad under **Åpne med**.
+On Windows, RavnPad registers itself for text files (`.txt`, `.text`, `.log`, `.md`) at startup, without administrator rights. Double-clicking those files opens them in RavnPad. If Windows already has another default app, choose RavnPad under **Open with**.
 
-## Bruk
+## Usage
 
-| Handling     | Snarvei         |
-| ------------ | --------------- |
-| Ny           | Ctrl+N          |
-| Åpne         | Ctrl+O          |
-| Lagre        | Ctrl+S          |
-| Lagre som    | Ctrl+Shift+S    |
-| Avslutt      | Ctrl+Q          |
+| Action    | Shortcut     |
+| --------- | ------------ |
+| New       | Ctrl+N       |
+| Open      | Ctrl+O       |
+| Save      | Ctrl+S       |
+| Save as   | Ctrl+Shift+S |
+| Quit      | Ctrl+Q       |
 
-Ulagrede endringer spør før Ny, Åpne, Avslutt og dra-og-slipp. Bare UTF-8 støttes.
+Unsaved changes prompt before New, Open, Quit, and drag-and-drop. Only UTF-8 is supported. Files larger than 2 MB open as a read-only view (scroll through the file without loading it all into memory), so large logs do not freeze the app.
 
-Åpne en fil fra kommandolinjen med `ravnpad fil.txt` (eller dra filen på programikonet). Dra-og-slipp inn i vinduet virker på Windows og på Linux via X11.
+Open a file from the command line with `ravnpad file.txt` (or drop the file on the program icon). Drag-and-drop into the window works on Windows and on Linux via X11.
 
-Ravn-logoen er et registrert varemerke.
+The Ravn logo is a registered trademark.
