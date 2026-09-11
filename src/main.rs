@@ -20,6 +20,8 @@ mod associate;
 mod fonts;
 mod i18n;
 mod large;
+#[cfg(target_os = "macos")]
+mod macopen;
 mod native_dialog;
 mod prefs;
 mod rtf;
@@ -41,6 +43,8 @@ fn main() -> eframe::Result {
     #[cfg(windows)]
     associate::register();
     update::cleanup_old();
+    #[cfg(target_os = "macos")]
+    macopen::install();
 
     let prefs = prefs::Prefs::load();
     let lang = prefs.lang;
@@ -147,6 +151,8 @@ struct RavnPad {
     spell_menu: Option<FindMatch>,
     spell_tx: Sender<SpellEvent>,
     spell_rx: Receiver<SpellEvent>,
+    #[cfg(target_os = "macos")]
+    pending_opens: std::collections::VecDeque<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -162,6 +168,8 @@ impl RavnPad {
         initial: Option<PathBuf>,
         prefs: prefs::Prefs,
     ) -> Self {
+        #[cfg(target_os = "macos")]
+        macopen::set_context(&cc.egui_ctx);
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         let font_list = fonts::available_fonts();
         fonts::apply(&cc.egui_ctx, &prefs.font, prefs.size, &font_list);
@@ -196,6 +204,8 @@ impl RavnPad {
             spell_menu: None,
             spell_tx,
             spell_rx,
+            #[cfg(target_os = "macos")]
+            pending_opens: std::collections::VecDeque::new(),
         };
 
         if !cfg!(debug_assertions) {
@@ -814,6 +824,22 @@ impl RavnPad {
         state.store(ctx, editor);
     }
 
+    // Files macOS asks us to open (double-click, "Open With"). One per
+    // frame so the save-confirmation can gate each open like drops do.
+    fn take_macos_opens(&mut self) -> Option<Action> {
+        #[cfg(target_os = "macos")]
+        {
+            if self.confirm.is_some() {
+                return None;
+            }
+            self.pending_opens.extend(macopen::drain());
+            if let Some(path) = self.pending_opens.pop_front() {
+                return Some(Action::OpenPath(path));
+            }
+        }
+        None
+    }
+
     fn take_drops(&mut self, ctx: &egui::Context) -> Option<Action> {
         let files = ctx.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
         let file = files.into_iter().next()?;
@@ -854,6 +880,9 @@ impl eframe::App for RavnPad {
         let mut action = self.handle_shortcuts(ctx);
         if action.is_none() {
             action = self.take_drops(ctx);
+        }
+        if action.is_none() {
+            action = self.take_macos_opens();
         }
 
         let t = self.t();
@@ -1097,9 +1126,9 @@ impl eframe::App for RavnPad {
                                         return;
                                     };
                                     if let SpellState::Ready(dict) = &self.spell {
-                                        let mut suggestions = Vec::new();
-                                        dict.suggest(&word, &mut suggestions);
-                                        for suggestion in suggestions.into_iter().take(5) {
+                                        for suggestion in
+                                            spell::suggest(&word, dict).into_iter().take(5)
+                                        {
                                             if ui.button(&suggestion).clicked() {
                                                 self.text.replace_range(
                                                     miss.byte..miss.byte + byte_len,
