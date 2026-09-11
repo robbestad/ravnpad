@@ -8,8 +8,11 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui::{
-    self, containers::scroll_area::ScrollSource, Align, Align2, Color32, FontId, Key,
-    KeyboardShortcut, Layout, Modifiers, TextStyle, ViewportCommand,
+    self, Align, Align2, Color32, FontId, Key, KeyboardShortcut, Layout, Modifiers,
+    PointerButton, TextStyle, ViewportCommand,
+    containers::scroll_area::ScrollSource,
+    style::ScrollAnimation,
+    text::{CCursor, CCursorRange},
 };
 
 #[cfg(windows)]
@@ -30,6 +33,7 @@ const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S)
 const SAVE_AS: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 
 fn main() -> eframe::Result {
     #[cfg(windows)]
@@ -613,6 +617,7 @@ impl RavnPad {
     }
 
     fn handle_shortcuts(&self, ctx: &egui::Context) -> Option<Action> {
+        self.select_all(ctx);
         ctx.input_mut(|input| {
             if input.consume_shortcut(&SAVE_AS) {
                 Some(Action::SaveAs)
@@ -622,12 +627,36 @@ impl RavnPad {
                 Some(Action::Open)
             } else if input.consume_shortcut(&NEW) {
                 Some(Action::New)
-            } else if input.consume_shortcut(&QUIT) {
+            } else if input.consume_shortcut(&QUIT) || input.consume_shortcut(&CLOSE) {
                 Some(Action::Quit)
             } else {
                 None
             }
         })
+    }
+
+    // egui scrolls to the primary cursor (the end of the document) when a key
+    // press changes the selection, so Cmd+A would yank the view to the bottom.
+    // Apply select-all ourselves instead: the stored range then equals the
+    // range the TextEdit computes this frame, so nothing scrolls.
+    fn select_all(&self, ctx: &egui::Context) {
+        let editor = egui::Id::new("editor");
+        if self.large.is_some()
+            || self.settings_open
+            || self.confirm.is_some()
+            || self.error.is_some()
+            || !matches!(self.update, UpdateUi::Idle)
+            || !ctx.memory(|mem| mem.has_focus(editor))
+            || !ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::A))
+        {
+            return;
+        }
+        let mut state = egui::text_edit::TextEditState::load(ctx, editor).unwrap_or_default();
+        state.cursor.set_char_range(Some(CCursorRange::two(
+            CCursor::new(0),
+            CCursor::new(self.text.chars().count()),
+        )));
+        state.store(ctx, editor);
     }
 
     fn take_drops(&mut self, ctx: &egui::Context) -> Option<Action> {
@@ -754,7 +783,7 @@ impl eframe::App for RavnPad {
                         }
                     })
                     .show(ui, |ui| {
-                        ui.add(
+                        let editor = ui.add(
                             egui::TextEdit::multiline(&mut self.text)
                                 .id(egui::Id::new("editor"))
                                 .font(TextStyle::Monospace)
@@ -763,6 +792,7 @@ impl eframe::App for RavnPad {
                                 .lock_focus(!dialog_busy)
                                 .interactive(!dialog_busy),
                         );
+                        drag_scroll(ui, &editor);
                     });
             }
         });
@@ -865,6 +895,31 @@ enum UpdateEvent {
     Ready(update::Restart),
     Failed(String),
     Unsupported,
+}
+
+// Scroll while drag-selecting past the edge of the scroll area so the
+// selection can extend beyond the visible text.
+fn drag_scroll(ui: &egui::Ui, editor: &egui::Response) {
+    if !editor.dragged_by(PointerButton::Primary) {
+        return;
+    }
+    let Some(pos) = ui.input(|input| input.pointer.interact_pos()) else {
+        return;
+    };
+    let clip = ui.clip_rect();
+    const MAX_SPEED: f32 = 24.0;
+    // Positive delta scrolls up, negative scrolls down.
+    let delta = if pos.y > clip.bottom() {
+        -(pos.y - clip.bottom()).clamp(4.0, MAX_SPEED)
+    } else if pos.y < clip.top() {
+        (clip.top() - pos.y).clamp(4.0, MAX_SPEED)
+    } else {
+        0.0
+    };
+    if delta != 0.0 {
+        ui.scroll_with_delta_animation(egui::vec2(0.0, delta), ScrollAnimation::none());
+        ui.ctx().request_repaint();
+    }
 }
 
 fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
