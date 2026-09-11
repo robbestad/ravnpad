@@ -1,6 +1,6 @@
 [package]
 name = "ravnpad"
-version = "1.2.11"
+version = "1.2.12"
 edition = "2024"
 rust-version = "1.88"
 description = "A simple UTF-8 notepad"
@@ -16,6 +16,7 @@ categories = ["gui", "text-editors"]
 eframe = "0.33"
 rfd = "0.15"
 serde_json = "1"
+spellbook = "0.4.2"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 

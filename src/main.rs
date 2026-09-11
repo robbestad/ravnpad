@@ -8,8 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Key, KeyboardShortcut, Layout, Modifiers,
-    PointerButton, TextStyle, ViewportCommand,
+    self, Align, Align2, Color32, FontId, Key, KeyboardShortcut, Layout, Modifiers, PointerButton,
+    TextStyle, ViewportCommand,
     containers::scroll_area::ScrollSource,
     style::ScrollAnimation,
     text::{CCursor, CCursorRange},
@@ -23,6 +23,7 @@ mod large;
 mod native_dialog;
 mod prefs;
 mod rtf;
+mod spell;
 mod update;
 
 const APP_NAME: &str = "RavnPad";
@@ -34,6 +35,7 @@ const SAVE_AS: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
+const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 
 fn main() -> eframe::Result {
     #[cfg(windows)]
@@ -100,8 +102,21 @@ enum AppError {
     File(large::FileError),
     Save(std::io::Error),
     Settings(std::io::Error),
+    Dictionary(String),
+    DictUnavailable,
     TooLargeToEdit,
     DropTooLarge,
+}
+
+enum SpellState {
+    Off,
+    Loading,
+    Ready(spellbook::Dictionary),
+}
+
+enum SpellEvent {
+    Loaded(spellbook::Dictionary),
+    Failed(spell::SpellError),
 }
 
 struct RavnPad {
@@ -120,6 +135,24 @@ struct RavnPad {
     update_rx: Receiver<UpdateEvent>,
     update: UpdateUi,
     restarting: bool,
+    find_open: bool,
+    find_query: String,
+    replace_with: String,
+    find_index: usize,
+    find_focus: bool,
+    pending_goto: Option<FindMatch>,
+    spell: SpellState,
+    spell_misses: Vec<(usize, usize)>,
+    spell_dirty: bool,
+    spell_tx: Sender<SpellEvent>,
+    spell_rx: Receiver<SpellEvent>,
+}
+
+#[derive(Clone, Copy)]
+struct FindMatch {
+    byte: usize,  // byte offset of the match, for replace_range
+    cchar: usize, // char index of the match, for the egui cursor range
+    len: usize,   // match length in chars
 }
 
 impl RavnPad {
@@ -132,6 +165,7 @@ impl RavnPad {
         let font_list = fonts::available_fonts();
         fonts::apply(&cc.egui_ctx, &prefs.font, prefs.size, &font_list);
         let (update_tx, update_rx) = mpsc::channel();
+        let (spell_tx, spell_rx) = mpsc::channel();
 
         let mut app = Self {
             text: String::new(),
@@ -149,10 +183,25 @@ impl RavnPad {
             update_rx,
             update: UpdateUi::Idle,
             restarting: false,
+            find_open: false,
+            find_query: String::new(),
+            replace_with: String::new(),
+            find_index: 0,
+            find_focus: false,
+            pending_goto: None,
+            spell: SpellState::Off,
+            spell_misses: Vec::new(),
+            spell_dirty: false,
+            spell_tx,
+            spell_rx,
         };
 
         if !cfg!(debug_assertions) {
             app.spawn_update_check(false);
+        }
+
+        if app.prefs.spellcheck {
+            app.start_spellcheck();
         }
 
         if let Some(path) = initial {
@@ -173,6 +222,10 @@ impl RavnPad {
         self.prefs.lang = lang;
         self.save_prefs();
         self.last_title.clear();
+        if self.prefs.spellcheck {
+            self.stop_spellcheck();
+            self.start_spellcheck();
+        }
     }
 
     fn apply_editor_font(&mut self, ctx: &egui::Context) {
@@ -184,6 +237,50 @@ impl RavnPad {
         if let Err(err) = self.prefs.save() {
             self.error = Some(AppError::Settings(err));
         }
+    }
+
+    fn goto_match(&mut self, ctx: &egui::Context, m: FindMatch) {
+        self.pending_goto = Some(m);
+        let editor = egui::Id::new("editor");
+        let mut st = egui::text_edit::TextEditState::load(ctx, editor).unwrap_or_default();
+        st.cursor.set_char_range(Some(CCursorRange::two(
+            CCursor::new(m.cchar),
+            CCursor::new(m.cchar + m.len),
+        )));
+        st.store(ctx, editor);
+    }
+
+    fn step_match(&mut self, ctx: &egui::Context, matches: &[FindMatch], step: i64) {
+        if matches.is_empty() {
+            return;
+        }
+        let n = matches.len() as i64;
+        self.find_index = (self.find_index as i64 + step).rem_euclid(n) as usize;
+        let m = matches[self.find_index];
+        self.goto_match(ctx, m);
+    }
+
+    fn close_find(&mut self, ctx: &egui::Context) {
+        self.find_open = false;
+        ctx.memory_mut(|mem| mem.request_focus(egui::Id::new("editor")));
+    }
+
+    fn start_spellcheck(&mut self) {
+        self.spell = SpellState::Loading;
+        let lang = self.prefs.lang;
+        let tx = self.spell_tx.clone();
+        thread::spawn(move || {
+            let event = match spell::load(lang) {
+                Ok(dict) => SpellEvent::Loaded(dict),
+                Err(err) => SpellEvent::Failed(err),
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    fn stop_spellcheck(&mut self) {
+        self.spell = SpellState::Off;
+        self.spell_misses.clear();
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -253,6 +350,18 @@ impl RavnPad {
                 self.apply_editor_font(ctx);
             }
 
+            ui.add_space(10.0);
+            let mut spell_on = !matches!(self.spell, SpellState::Off);
+            if ui.checkbox(&mut spell_on, t.spellcheck).changed() {
+                self.prefs.spellcheck = spell_on;
+                self.save_prefs();
+                if spell_on {
+                    self.start_spellcheck();
+                } else {
+                    self.stop_spellcheck();
+                }
+            }
+
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(8.0);
@@ -311,6 +420,7 @@ impl RavnPad {
                 self.saved_text.clear();
                 self.path = None;
                 self.large = None;
+                self.spell_dirty = true;
             }
             Action::Open => {
                 if let Some(path) = self.pick_open_path() {
@@ -342,6 +452,7 @@ impl RavnPad {
                 self.text = text;
                 self.saved_text.clone_from(&self.text);
                 self.path = None;
+                self.spell_dirty = true;
             }
             Action::CheckUpdate => {
                 self.update = UpdateUi::Checking { user: true };
@@ -382,6 +493,27 @@ impl RavnPad {
             };
             let _ = tx.send(event);
         });
+    }
+
+    fn poll_spell(&mut self, ctx: &egui::Context) {
+        while let Ok(event) = self.spell_rx.try_recv() {
+            match event {
+                SpellEvent::Loaded(dict) => {
+                    if self.prefs.spellcheck {
+                        self.spell = SpellState::Ready(dict);
+                        self.spell_dirty = true;
+                    }
+                }
+                SpellEvent::Failed(err) => {
+                    self.spell = SpellState::Off;
+                    self.error = Some(match err {
+                        spell::SpellError::Unavailable => AppError::DictUnavailable,
+                        other => AppError::Dictionary(other.to_string()),
+                    });
+                }
+            }
+            ctx.request_repaint();
+        }
     }
 
     fn poll_update(&mut self, ctx: &egui::Context) -> Option<Action> {
@@ -556,7 +688,11 @@ impl RavnPad {
     }
 
     fn pick_save_path(&self) -> Option<PathBuf> {
-        native_dialog::pick_save(self.t().save_as, self.dialog_dir(), &self.display_name_for_save())
+        native_dialog::pick_save(
+            self.t().save_as,
+            self.dialog_dir(),
+            &self.display_name_for_save(),
+        )
     }
 
     fn dialog_dir(&self) -> Option<&std::path::Path> {
@@ -601,6 +737,7 @@ impl RavnPad {
             }
             Err(err) => self.error = Some(AppError::File(err)),
         }
+        self.spell_dirty = true;
     }
 
     fn write_current(&mut self) -> bool {
@@ -623,8 +760,17 @@ impl RavnPad {
         }
     }
 
-    fn handle_shortcuts(&self, ctx: &egui::Context) -> Option<Action> {
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) -> Option<Action> {
         self.select_all(ctx);
+        if self.large.is_none()
+            && !self.settings_open
+            && self.confirm.is_none()
+            && self.error.is_none()
+            && ctx.input_mut(|input| input.consume_shortcut(&FIND))
+        {
+            self.find_open = true;
+            self.find_focus = true;
+        }
         ctx.input_mut(|input| {
             if input.consume_shortcut(&SAVE_AS) {
                 Some(Action::SaveAs)
@@ -735,6 +881,12 @@ impl eframe::App for RavnPad {
                 if ui.button(t.settings_menu).clicked() {
                     self.settings_open = true;
                 }
+                ui.add_enabled_ui(self.large.is_none(), |ui| {
+                    if ui.button(t.find).clicked() {
+                        self.find_open = true;
+                        self.find_focus = true;
+                    }
+                });
                 ui.menu_button(t.help_menu, |ui| {
                     ui.label(format!("RavnPad {}", update::CURRENT));
                     ui.separator();
@@ -745,6 +897,98 @@ impl eframe::App for RavnPad {
                 });
             });
         });
+
+        let mut matches = if self.find_open && self.large.is_none() {
+            find_matches(&self.text, &self.find_query)
+        } else {
+            Vec::new()
+        };
+        self.find_index = self.find_index.min(matches.len().saturating_sub(1));
+
+        if self.find_open && self.large.is_none() {
+            let mut close_find = false;
+            egui::TopBottomPanel::top("finn").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let query = ui.add(
+                        egui::TextEdit::singleline(&mut self.find_query)
+                            .id(egui::Id::new("sok_felt"))
+                            .hint_text(t.find)
+                            .desired_width(180.0),
+                    );
+                    if std::mem::take(&mut self.find_focus) {
+                        query.request_focus();
+                        let mut st =
+                            egui::text_edit::TextEditState::load(ctx, query.id).unwrap_or_default();
+                        st.cursor.set_char_range(Some(CCursorRange::two(
+                            CCursor::new(0),
+                            CCursor::new(self.find_query.chars().count()),
+                        )));
+                        st.store(ctx, query.id);
+                    }
+                    if query.changed() {
+                        self.find_index = 0;
+                        matches = find_matches(&self.text, &self.find_query);
+                        if let Some(m) = matches.first().copied() {
+                            self.goto_match(ctx, m);
+                        }
+                    }
+                    if query.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        let step = if ui.input(|i| i.modifiers.shift) {
+                            -1
+                        } else {
+                            1
+                        };
+                        self.step_match(ctx, &matches, step);
+                        query.request_focus();
+                    }
+                    let count = if matches.is_empty() {
+                        "0".to_owned()
+                    } else {
+                        format!("{}/{}", self.find_index + 1, matches.len())
+                    };
+                    ui.weak(count);
+                    if ui.button("↑").clicked() {
+                        self.step_match(ctx, &matches, -1);
+                    }
+                    if ui.button("↓").clicked() {
+                        self.step_match(ctx, &matches, 1);
+                    }
+                    ui.separator();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.replace_with)
+                            .id(egui::Id::new("erstatt_felt"))
+                            .hint_text(t.replace)
+                            .desired_width(140.0),
+                    );
+                    if ui.button(t.replace).clicked()
+                        && let Some(m) = matches.get(self.find_index).copied()
+                    {
+                        self.text.replace_range(
+                            m.byte..m.byte + self.find_query.len(),
+                            &self.replace_with,
+                        );
+                        self.spell_dirty = true;
+                        matches = find_matches(&self.text, &self.find_query);
+                        self.find_index = self.find_index.min(matches.len().saturating_sub(1));
+                        if let Some(next) = matches.get(self.find_index).copied() {
+                            self.goto_match(ctx, next);
+                        }
+                    }
+                    if ui.button(t.replace_all).clicked() && !self.find_query.is_empty() {
+                        self.text = self.text.replace(&self.find_query, &self.replace_with);
+                        self.spell_dirty = true;
+                        matches = find_matches(&self.text, &self.find_query);
+                        self.find_index = 0;
+                    }
+                    if ui.button("✕").clicked() {
+                        close_find = true;
+                    }
+                });
+            });
+            if close_find {
+                self.close_find(ctx);
+            }
+        }
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -758,7 +1002,11 @@ impl eframe::App for RavnPad {
                     if let Some(view) = &self.large {
                         ui.label(view.status(t.view_readonly, t.decimal));
                     } else {
-                        ui.label(t.chars(self.text.chars().count()));
+                        ui.label(format!(
+                            "{} · {}",
+                            t.chars(self.text.chars().count()),
+                            t.words(self.text.split_whitespace().count())
+                        ));
                     }
                 });
             });
@@ -768,6 +1016,10 @@ impl eframe::App for RavnPad {
             || self.confirm.is_some()
             || self.error.is_some()
             || !matches!(self.update, UpdateUi::Idle);
+
+        if self.find_open && !dialog_busy && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.close_find(ctx);
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(view) = &mut self.large {
@@ -790,16 +1042,29 @@ impl eframe::App for RavnPad {
                         }
                     })
                     .show(ui, |ui| {
-                        let editor = ui.add(
-                            egui::TextEdit::multiline(&mut self.text)
-                                .id(egui::Id::new("editor"))
-                                .font(TextStyle::Monospace)
-                                .desired_width(ui.available_width())
-                                .desired_rows(min_rows)
-                                .lock_focus(!dialog_busy)
-                                .interactive(!dialog_busy),
-                        );
-                        drag_scroll(ui, &editor);
+                        let output = egui::TextEdit::multiline(&mut self.text)
+                            .id(egui::Id::new("editor"))
+                            .font(TextStyle::Monospace)
+                            .desired_width(ui.available_width())
+                            .desired_rows(min_rows)
+                            .lock_focus(!dialog_busy)
+                            .interactive(!dialog_busy)
+                            .show(ui);
+                        drag_scroll(ui, &output.response);
+                        paint_matches(ui, &output, &matches, self.find_index);
+                        if let SpellState::Ready(dict) = &self.spell {
+                            if output.response.changed() || self.spell_dirty {
+                                self.spell_misses = spell::misspellings(&self.text, dict);
+                                self.spell_dirty = false;
+                            }
+                            paint_misses(ui, &output, &self.spell_misses);
+                        }
+                        if let Some(m) = self.pending_goto.take() {
+                            let rect = match_rects(&output.galley, m)
+                                .0
+                                .translate(output.galley_pos.to_vec2());
+                            ui.scroll_to_rect(rect, Some(Align::Center));
+                        }
                     });
             }
         });
@@ -849,6 +1114,8 @@ impl eframe::App for RavnPad {
                 AppError::File(err) => t.file_error(&err),
                 AppError::Save(err) => t.save_error(&err),
                 AppError::Settings(err) => t.settings_error(&err),
+                AppError::Dictionary(err) => t.dictionary_error(&err),
+                AppError::DictUnavailable => t.dict_unavailable.to_owned(),
                 AppError::TooLargeToEdit => t.too_large_edit.to_owned(),
                 AppError::DropTooLarge => t.drop_too_large.to_owned(),
             };
@@ -858,6 +1125,7 @@ impl eframe::App for RavnPad {
         if action.is_none() {
             action = self.poll_update(ctx);
         }
+        self.poll_spell(ctx);
 
         if ctx.input(|input| input.viewport().close_requested())
             && self.is_dirty()
@@ -903,6 +1171,114 @@ enum UpdateEvent {
     Ready(update::Restart),
     Failed(String),
     Unsupported,
+}
+
+fn find_matches(text: &str, query: &str) -> Vec<FindMatch> {
+    let len = query.chars().count();
+    if len == 0 {
+        return Vec::new();
+    }
+    let starts: Vec<usize> = text.match_indices(query).map(|(b, _)| b).collect();
+    let mut matches = Vec::with_capacity(starts.len());
+    let mut next = starts.iter().peekable();
+    for (cchar, (byte, _)) in text.char_indices().enumerate() {
+        if next.peek() == Some(&&byte) {
+            matches.push(FindMatch { byte, cchar, len });
+            next.next();
+        }
+    }
+    matches
+}
+
+// The editor's own selection is only painted while it has focus, so while
+// the find field is focused we draw match boxes ourselves via the galley.
+fn paint_matches(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    matches: &[FindMatch],
+    current: usize,
+) {
+    if matches.is_empty() {
+        return;
+    }
+    let clip = output.text_clip_rect.intersect(ui.clip_rect());
+    let painter = ui.painter().with_clip_rect(clip);
+    let shift = output.galley_pos.to_vec2();
+    for (i, &m) in matches.iter().enumerate() {
+        let fill = if i == current {
+            Color32::from_rgba_unmultiplied(255, 138, 0, 130)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 193, 7, 60)
+        };
+        let (first, second) = match_rects(&output.galley, m);
+        painter.rect_filled(first.translate(shift), 2.0, fill);
+        if let Some(rect) = second {
+            painter.rect_filled(rect.translate(shift), 2.0, fill);
+        }
+    }
+}
+
+fn paint_misses(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    misses: &[(usize, usize)],
+) {
+    if misses.is_empty() {
+        return;
+    }
+    let clip = output.text_clip_rect.intersect(ui.clip_rect());
+    let painter = ui.painter().with_clip_rect(clip);
+    let shift = output.galley_pos.to_vec2();
+    let color = Color32::from_rgb(220, 40, 40);
+    for &(cchar, len) in misses {
+        let m = FindMatch {
+            byte: 0,
+            cchar,
+            len,
+        };
+        let (first, second) = match_rects(&output.galley, m);
+        squiggle(&painter, first.translate(shift), color);
+        if let Some(rect) = second {
+            squiggle(&painter, rect.translate(shift), color);
+        }
+    }
+}
+
+fn squiggle(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let mut points = Vec::new();
+    let mut x = rect.min.x;
+    let high = rect.max.y - 1.0;
+    let low = rect.max.y - 3.0;
+    points.push(egui::pos2(x, high));
+    let mut up = true;
+    while x < rect.max.x {
+        x = (x + 3.0).min(rect.max.x);
+        points.push(egui::pos2(x, if up { low } else { high }));
+        up = !up;
+    }
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, color)));
+}
+
+// A match never spans a newline (the query field is single-line) but can
+// cross a soft-wrapped row: return the start-segment plus an optional
+// continuation segment, in galley coordinates.
+fn match_rects(galley: &egui::Galley, m: FindMatch) -> (egui::Rect, Option<egui::Rect>) {
+    let a = galley.pos_from_cursor(CCursor::new(m.cchar));
+    let b = galley.pos_from_cursor(CCursor::new(m.cchar + m.len));
+    if (a.min.y - b.min.y).abs() < 0.5 {
+        (
+            egui::Rect::from_min_max(a.min, egui::pos2(b.min.x.max(a.min.x), a.max.y)),
+            None,
+        )
+    } else {
+        (
+            egui::Rect::from_min_max(a.min, egui::pos2(galley.rect.max.x, a.max.y)),
+            Some(egui::Rect::from_min_max(
+                egui::pos2(galley.rect.min.x, b.min.y),
+                b.max,
+            )),
+        )
+    }
 }
 
 // Scroll while drag-selecting past the edge of the scroll area so the
