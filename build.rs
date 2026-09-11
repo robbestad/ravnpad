@@ -41,12 +41,8 @@ fn macos_icon(src: &image::RgbaImage) -> image::RgbaImage {
     let (w, h) = src.dimensions();
     let inner_w = (w as f64 * FILL).round() as u32;
     let inner_h = (h as f64 * FILL).round() as u32;
-    let inner = image::imageops::resize(
-        src,
-        inner_w,
-        inner_h,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let inner =
+        image::imageops::resize(src, inner_w, inner_h, image::imageops::FilterType::Lanczos3);
     let mut canvas = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 0]));
     image::imageops::overlay(
         &mut canvas,

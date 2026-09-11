@@ -7,6 +7,7 @@ pub struct Prefs {
     pub lang: Lang,
     pub font: String,
     pub size: f32,
+    pub spellcheck: bool,
 }
 
 impl Prefs {
@@ -15,6 +16,7 @@ impl Prefs {
             lang: i18n::detect(),
             font: String::new(),
             size: 15.0,
+            spellcheck: false,
         };
         if let Some(path) = settings_path()
             && let Ok(text) = std::fs::read_to_string(path)
@@ -28,6 +30,7 @@ impl Prefs {
                             }
                         }
                         "font" => prefs.font = value.trim().to_owned(),
+                        "spell" => prefs.spellcheck = value.trim() == "1",
                         "size" => {
                             if let Ok(size) = value.trim().parse::<f32>() {
                                 prefs.size = size.clamp(10.0, 36.0);
@@ -54,25 +57,24 @@ impl Prefs {
             std::fs::create_dir_all(dir)?;
         }
         let body = format!(
-            "lang={}\nfont={}\nsize={}\n",
+            "lang={}\nfont={}\nsize={}\nspell={}\n",
             self.lang.code(),
             self.font,
-            self.size
+            self.size,
+            u8::from(self.spellcheck)
         );
         std::fs::write(path, body)
     }
 }
 
-fn config_dir() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         Some(PathBuf::from(std::env::var_os("APPDATA")?).join("RavnPad"))
     }
     #[cfg(target_os = "macos")]
     {
-        Some(
-            PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/RavnPad"),
-        )
+        Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/RavnPad"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
