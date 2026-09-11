@@ -142,8 +142,9 @@ struct RavnPad {
     find_focus: bool,
     pending_goto: Option<FindMatch>,
     spell: SpellState,
-    spell_misses: Vec<(usize, usize)>,
+    spell_misses: Vec<spell::Miss>,
     spell_dirty: bool,
+    spell_menu: Option<FindMatch>,
     spell_tx: Sender<SpellEvent>,
     spell_rx: Receiver<SpellEvent>,
 }
@@ -192,6 +193,7 @@ impl RavnPad {
             spell: SpellState::Off,
             spell_misses: Vec::new(),
             spell_dirty: false,
+            spell_menu: None,
             spell_tx,
             spell_rx,
         };
@@ -1059,8 +1061,71 @@ impl eframe::App for RavnPad {
                             }
                             paint_misses(ui, &output, &self.spell_misses);
                         }
+                        if !self.spell_misses.is_empty() {
+                            if output.response.secondary_clicked()
+                                && let Some(pos) = output.response.interact_pointer_pos()
+                            {
+                                let cursor = output.galley.cursor_from_pos(pos - output.galley_pos);
+                                self.spell_menu = self
+                                    .spell_misses
+                                    .iter()
+                                    .copied()
+                                    .find(|m| {
+                                        cursor.index >= m.cchar && cursor.index <= m.cchar + m.len
+                                    })
+                                    .map(|m| FindMatch {
+                                        byte: m.byte,
+                                        cchar: m.cchar,
+                                        len: m.len,
+                                    });
+                            }
+                            if self.spell_menu.is_some() {
+                                output.response.context_menu(|ui| {
+                                    let Some(miss) = self.spell_menu else {
+                                        return;
+                                    };
+                                    let byte_len: usize = self.text[miss.byte..]
+                                        .chars()
+                                        .take(miss.len)
+                                        .map(char::len_utf8)
+                                        .sum();
+                                    let Some(word) = self
+                                        .text
+                                        .get(miss.byte..miss.byte + byte_len)
+                                        .map(str::to_owned)
+                                    else {
+                                        return;
+                                    };
+                                    if let SpellState::Ready(dict) = &self.spell {
+                                        let mut suggestions = Vec::new();
+                                        dict.suggest(&word, &mut suggestions);
+                                        for suggestion in suggestions.into_iter().take(5) {
+                                            if ui.button(&suggestion).clicked() {
+                                                self.text.replace_range(
+                                                    miss.byte..miss.byte + byte_len,
+                                                    &suggestion,
+                                                );
+                                                self.spell_dirty = true;
+                                                ui.close();
+                                            }
+                                        }
+                                        ui.separator();
+                                    }
+                                    if ui.button(t.add_to_dict).clicked() {
+                                        if let SpellState::Ready(dict) = &mut self.spell {
+                                            let _ = dict.add(&word);
+                                        }
+                                        if let Err(err) = spell::add_personal(&word) {
+                                            self.error = Some(AppError::Settings(err));
+                                        }
+                                        self.spell_dirty = true;
+                                        ui.close();
+                                    }
+                                });
+                            }
+                        }
                         if let Some(m) = self.pending_goto.take() {
-                            let rect = match_rects(&output.galley, m)
+                            let rect = match_rects(&output.galley, m.cchar, m.len)
                                 .0
                                 .translate(output.galley_pos.to_vec2());
                             ui.scroll_to_rect(rect, Some(Align::Center));
@@ -1210,7 +1275,7 @@ fn paint_matches(
         } else {
             Color32::from_rgba_unmultiplied(255, 193, 7, 60)
         };
-        let (first, second) = match_rects(&output.galley, m);
+        let (first, second) = match_rects(&output.galley, m.cchar, m.len);
         painter.rect_filled(first.translate(shift), 2.0, fill);
         if let Some(rect) = second {
             painter.rect_filled(rect.translate(shift), 2.0, fill);
@@ -1218,11 +1283,7 @@ fn paint_matches(
     }
 }
 
-fn paint_misses(
-    ui: &egui::Ui,
-    output: &egui::text_edit::TextEditOutput,
-    misses: &[(usize, usize)],
-) {
+fn paint_misses(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput, misses: &[spell::Miss]) {
     if misses.is_empty() {
         return;
     }
@@ -1230,13 +1291,8 @@ fn paint_misses(
     let painter = ui.painter().with_clip_rect(clip);
     let shift = output.galley_pos.to_vec2();
     let color = Color32::from_rgb(220, 40, 40);
-    for &(cchar, len) in misses {
-        let m = FindMatch {
-            byte: 0,
-            cchar,
-            len,
-        };
-        let (first, second) = match_rects(&output.galley, m);
+    for miss in misses {
+        let (first, second) = match_rects(&output.galley, miss.cchar, miss.len);
         squiggle(&painter, first.translate(shift), color);
         if let Some(rect) = second {
             squiggle(&painter, rect.translate(shift), color);
@@ -1262,9 +1318,13 @@ fn squiggle(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
 // A match never spans a newline (the query field is single-line) but can
 // cross a soft-wrapped row: return the start-segment plus an optional
 // continuation segment, in galley coordinates.
-fn match_rects(galley: &egui::Galley, m: FindMatch) -> (egui::Rect, Option<egui::Rect>) {
-    let a = galley.pos_from_cursor(CCursor::new(m.cchar));
-    let b = galley.pos_from_cursor(CCursor::new(m.cchar + m.len));
+fn match_rects(
+    galley: &egui::Galley,
+    cchar: usize,
+    len: usize,
+) -> (egui::Rect, Option<egui::Rect>) {
+    let a = galley.pos_from_cursor(CCursor::new(cchar));
+    let b = galley.pos_from_cursor(CCursor::new(cchar + len));
     if (a.min.y - b.min.y).abs() < 0.5 {
         (
             egui::Rect::from_min_max(a.min, egui::pos2(b.min.x.max(a.min.x), a.max.y)),
