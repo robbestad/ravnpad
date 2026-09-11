@@ -1,5 +1,7 @@
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+#[cfg(windows)]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,13 +16,14 @@ pub enum Error {
     Network(String),
     NoAsset,
     Zip(String),
+    Install(String),
     Io(io::Error),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Network(msg) | Self::Zip(msg) => write!(f, "{msg}"),
+            Self::Network(msg) | Self::Zip(msg) | Self::Install(msg) => write!(f, "{msg}"),
             Self::NoAsset => write!(f, "no download for this system"),
             Self::Io(err) => write!(f, "{err}"),
         }
@@ -84,6 +87,14 @@ pub fn install(url: &str) -> Result<Restart, Error> {
 pub fn cleanup_old() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = fs::remove_file(with_suffix(&exe, ".old"));
+    }
+    if let Ok(entries) = fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("ravnpad-update-") {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
     }
 }
 
@@ -204,6 +215,7 @@ fn apply_payload(unpacked: &Path) -> Result<Restart, Error> {
             if !new_app.is_dir() {
                 return Err(Error::Zip("release zip is missing RavnPad.app".into()));
             }
+            ensure_replaceable(&app)?;
             write_macos_helper(&app, &new_app)?;
             return Ok(Restart::Helper);
         }
@@ -293,6 +305,37 @@ fn mac_binary(unpacked: &Path) -> Option<PathBuf> {
     flat.is_file().then_some(flat)
 }
 
+// The app must be swappable by the helper script after this process exits.
+// Fail here, while we can still show an error, instead of letting the script
+// fail silently on a read-only or permission-locked location.
+#[cfg(target_os = "macos")]
+fn ensure_replaceable(app: &Path) -> Result<(), Error> {
+    if app.to_string_lossy().contains("AppTranslocation") {
+        return Err(Error::Install(format!(
+            "macOS is running RavnPad from a temporary read-only location \
+             ({}). Move RavnPad.app to /Applications and try again.",
+            app.display()
+        )));
+    }
+    let Some(dir) = app.parent() else {
+        return Err(Error::Install(format!(
+            "cannot locate the app directory for {}",
+            app.display()
+        )));
+    };
+    let probe = dir.join(".ravnpad-write-test");
+    match fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(err) => Err(Error::Install(format!(
+            "no write access to {}: {err}",
+            dir.display()
+        ))),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn write_macos_helper(app: &Path, new_app: &Path) -> Result<(), Error> {
     let script = std::env::temp_dir().join(format!("ravnpad-relaunch-{}.sh", std::process::id()));
@@ -302,11 +345,19 @@ fn write_macos_helper(app: &Path, new_app: &Path) -> Result<(), Error> {
          app=\"$2\"\n\
          new=\"$3\"\n\
          shift 3\n\
-         while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done\n\
-         rm -rf \"$app\"\n\
-         mv \"$new\" \"$app\"\n\
-         xattr -dr com.apple.quarantine \"$app\" 2>/dev/null || true\n\
-         if [ \"$#\" -gt 0 ]; then open -a \"$app\" \"$@\"; else open \"$app\"; fi\n\
+         log=\"${{TMPDIR:-/tmp}}/ravnpad-update.log\"\n\
+         i=0\n\
+         while kill -0 \"$pid\" 2>/dev/null && [ \"$i\" -lt 600 ]; do sleep 0.2; i=$((i + 1)); done\n\
+         backup=\"$app.ravnpad-bak\"\n\
+         rm -rf \"$backup\"\n\
+         if mv \"$app\" \"$backup\" 2>>\"$log\" && mv \"$new\" \"$app\" 2>>\"$log\"; then\n\
+         \x20   rm -rf \"$backup\"\n\
+         \x20   xattr -dr com.apple.quarantine \"$app\" 2>/dev/null || true\n\
+         else\n\
+         \x20   echo \"$(date): failed to replace $app\" >>\"$log\"\n\
+         \x20   mv \"$backup\" \"$app\" 2>>\"$log\"\n\
+         fi\n\
+         if [ \"$#\" -gt 0 ]; then open -a \"$app\" \"$@\" 2>>\"$log\"; else open \"$app\" 2>>\"$log\"; fi\n\
          rm -f \"$0\"\n"
     );
     fs::write(&script, body)?;
