@@ -39,6 +39,7 @@ jobs:
 
       - name: Verify tag matches crate version
         if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
         run: |
           tag="${GITHUB_REF_NAME#v}"
           crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
