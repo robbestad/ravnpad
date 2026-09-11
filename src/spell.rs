@@ -148,12 +148,15 @@ pub fn add_personal(word: &str) -> std::io::Result<()> {
 }
 
 // Word spans as (char index, byte index, &str word) for spell checking.
-// Apostrophes inside a word are treated as part of it ("don't", "fisk'").
+// Apostrophes and hyphens inside a word are treated as part of it
+// ("don't", "stålrørs-stol") so compounds are checked and replaced whole.
+const SEPARATORS: [char; 3] = ['-', '\u{2010}', '\u{2011}'];
+
 pub fn word_spans(text: &str) -> Vec<(usize, usize, &str)> {
     let mut spans = Vec::new();
     let mut start = None; // (char index, byte index)
     for (cchar, (byte, ch)) in text.char_indices().enumerate() {
-        let word_char = ch.is_alphanumeric() || ch == '\'' || ch == '’';
+        let word_char = ch.is_alphanumeric() || ch == '\'' || ch == '’' || SEPARATORS.contains(&ch);
         match (word_char, start) {
             (true, None) => start = Some((cchar, byte)),
             (false, Some((cs, bs))) => {
@@ -173,13 +176,63 @@ pub fn word_spans(text: &str) -> Vec<(usize, usize, &str)> {
 pub fn misspellings(text: &str, dict: &spellbook::Dictionary) -> Vec<Miss> {
     word_spans(text)
         .into_iter()
-        .filter(|(_, _, word)| !skip_word(word) && !dict.check(word))
+        .filter(|(_, _, word)| !is_correct(word, dict))
         .map(|(cchar, byte, word)| Miss {
             cchar,
             byte,
             len: word.chars().count(),
         })
         .collect()
+}
+
+fn is_correct(word: &str, dict: &spellbook::Dictionary) -> bool {
+    if skip_word(word) || dict.check(word) {
+        return true;
+    }
+    // The dictionaries have no BREAK rules, so hyphenated compounds fail
+    // as a whole even when every part is a real word — check the parts.
+    word.contains(SEPARATORS)
+        && part_spans(word)
+            .into_iter()
+            .all(|(s, e)| is_correct(&word[s..e], dict))
+}
+
+// Byte spans of the word's hyphen-separated parts.
+fn part_spans(word: &str) -> Vec<(usize, usize)> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (i, ch) in word.char_indices() {
+        if SEPARATORS.contains(&ch) {
+            parts.push((start, i));
+            start = i + ch.len_utf8();
+        }
+    }
+    parts.push((start, word.len()));
+    parts.into_iter().filter(|(s, e)| s < e).collect()
+}
+
+// Suggestions for the context menu. For hyphenated words the dictionary
+// suggestion engine knows nothing, so also offer the compound rebuilt
+// with each misspelled part corrected.
+pub fn suggest(word: &str, dict: &spellbook::Dictionary) -> Vec<String> {
+    let mut out = Vec::new();
+    dict.suggest(word, &mut out);
+    if word.contains(SEPARATORS) {
+        for (s, e) in part_spans(word) {
+            let part = &word[s..e];
+            if is_correct(part, dict) {
+                continue;
+            }
+            let mut part_sugg = Vec::new();
+            dict.suggest(part, &mut part_sugg);
+            for suggestion in part_sugg.into_iter().take(3) {
+                out.push(format!("{}{}{}", &word[..s], suggestion, &word[e..]));
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|s| seen.insert(s.clone()));
+    out
 }
 
 fn skip_word(word: &str) -> bool {
@@ -212,6 +265,26 @@ mod tests {
         assert_eq!(spans, vec!["abc", "123", "def"]);
     }
 
+    #[test]
+    fn word_spans_keeps_hyphenated_words_whole() {
+        let spans: Vec<&str> = word_spans("en stålrørs-stol og – ja")
+            .into_iter()
+            .map(|(_, _, word)| word)
+            .collect();
+        assert_eq!(spans, vec!["en", "stålrørs-stol", "og", "ja"]);
+    }
+
+    #[test]
+    fn part_spans_splits_on_all_hyphens() {
+        assert_eq!(
+            part_spans("stål-rørs\u{2010}stol")
+                .into_iter()
+                .map(|(s, e)| "stål-rørs\u{2010}stol"[s..e].to_owned())
+                .collect::<Vec<_>>(),
+            vec!["stål", "rørs", "stol"]
+        );
+    }
+
     // Downloads the real nb dictionary once; cached under the config dir.
     #[test]
     #[ignore]
@@ -224,5 +297,11 @@ mod tests {
         let mut suggestions = Vec::new();
         dict.suggest("hnud", &mut suggestions);
         assert!(!suggestions.is_empty());
+
+        // Hyphenated compounds are checked per part.
+        assert!(is_correct("hund-hus", &dict));
+        assert!(!is_correct("hund-huss", &dict));
+        let suggestions = suggest("hund-huss", &dict);
+        assert!(suggestions.iter().any(|s| s == "hund-hus"));
     }
 }

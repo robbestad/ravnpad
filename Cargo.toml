@@ -1,6 +1,6 @@
 [package]
 name = "ravnpad"
-version = "1.2.13"
+version = "1.2.14"
 edition = "2024"
 rust-version = "1.88"
 description = "A simple UTF-8 notepad"
@@ -25,6 +25,9 @@ winreg = "0.55"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["x11"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
 
 [build-dependencies]
 icns = "0.3"
