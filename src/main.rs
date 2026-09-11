@@ -99,6 +99,7 @@ enum Action {
 enum AppError {
     File(large::FileError),
     Save(std::io::Error),
+    Settings(std::io::Error),
     TooLargeToEdit,
     DropTooLarge,
 }
@@ -170,13 +171,19 @@ impl RavnPad {
             return;
         }
         self.prefs.lang = lang;
-        self.prefs.save();
+        self.save_prefs();
         self.last_title.clear();
     }
 
     fn apply_editor_font(&mut self, ctx: &egui::Context) {
         fonts::apply(ctx, &self.prefs.font, self.prefs.size, &self.fonts);
-        self.prefs.save();
+        self.save_prefs();
+    }
+
+    fn save_prefs(&mut self) {
+        if let Err(err) = self.prefs.save() {
+            self.error = Some(AppError::Settings(err));
+        }
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -826,8 +833,8 @@ impl eframe::App for RavnPad {
                     }
                 }
                 native_dialog::Confirm::Discard => {
-                    self.saved_text.clone_from(&self.text);
                     if matches!(pending, Action::Quit) {
+                        self.saved_text.clone_from(&self.text);
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     } else {
                         self.execute(pending);
@@ -841,6 +848,7 @@ impl eframe::App for RavnPad {
             let message = match error {
                 AppError::File(err) => t.file_error(&err),
                 AppError::Save(err) => t.save_error(&err),
+                AppError::Settings(err) => t.settings_error(&err),
                 AppError::TooLargeToEdit => t.too_large_edit.to_owned(),
                 AppError::DropTooLarge => t.drop_too_large.to_owned(),
             };

@@ -37,6 +37,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Verify tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$crate" ]; then
+            echo "tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
       - name: Build
         run: cargo build --release --locked
 
@@ -52,6 +62,8 @@ jobs:
           cp target/release/ravnpad RavnPad.app/Contents/MacOS/ravnpad
           chmod +x RavnPad.app/Contents/MacOS/ravnpad
           cp packaging/macos/Info.plist RavnPad.app/Contents/Info.plist
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" -c "Set :CFBundleVersion $version" RavnPad.app/Contents/Info.plist
           test -f target/release/ravnpad.icns
           cp target/release/ravnpad.icns RavnPad.app/Contents/Resources/RavnPad.icns
           # Sign the complete bundle after all files have been placed.

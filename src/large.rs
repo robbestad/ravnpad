@@ -88,23 +88,25 @@ impl LargeView {
         let text_w = (ui.available_width() - bar_w).max(40.0);
         let wrap_cols = wrap_columns(ui, text_w);
 
-        if let Err(err) = self.ensure_window(rows, wrap_cols) {
-            let message = match err {
-                FileError::Open(err) | FileError::Read(err) => format!("{cannot_read}:\n{err}"),
-                FileError::InvalidUtf8 | FileError::InvalidRtf => cannot_read.to_owned(),
-            };
-            ui.colored_label(Color32::from_rgb(160, 40, 40), message);
-            return;
-        }
+        let mut result = self.ensure_window(rows, wrap_cols);
 
-        if !dialog_busy {
-            self.handle_input(
+        if result.is_ok() && !dialog_busy {
+            result = self.handle_input(
                 ui,
                 rows,
                 wrap_cols,
                 row_height,
                 ui.rect_contains_pointer(ui.max_rect()),
             );
+        }
+
+        if let Err(err) = result {
+            let message = match err {
+                FileError::Open(err) | FileError::Read(err) => format!("{cannot_read}:\n{err}"),
+                FileError::InvalidUtf8 | FileError::InvalidRtf => cannot_read.to_owned(),
+            };
+            ui.colored_label(Color32::from_rgb(160, 40, 40), message);
+            return;
         }
 
         ui.horizontal(|ui| {
@@ -136,13 +138,13 @@ impl LargeView {
         wrap_cols: usize,
         row_height: f32,
         hovered: bool,
-    ) {
+    ) -> Result<(), FileError> {
         if hovered {
             let scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll_y.abs() >= 1.0 {
                 let lines = (scroll_y / row_height).round() as i64;
                 if lines != 0 {
-                    let _ = self.scroll_lines(-lines, rows, wrap_cols);
+                    self.scroll_lines(-lines, rows, wrap_cols)?;
                 }
             }
         }
@@ -151,23 +153,24 @@ impl LargeView {
             input.key_pressed(egui::Key::PageDown)
                 || (input.key_pressed(egui::Key::ArrowDown) && input.modifiers.command)
         }) {
-            let _ = self.scroll_lines(rows as i64, rows, wrap_cols);
+            self.scroll_lines(rows as i64, rows, wrap_cols)?;
         } else if ui.input(|input| {
             input.key_pressed(egui::Key::PageUp)
                 || (input.key_pressed(egui::Key::ArrowUp) && input.modifiers.command)
         }) {
-            let _ = self.scroll_lines(-(rows as i64), rows, wrap_cols);
+            self.scroll_lines(-(rows as i64), rows, wrap_cols)?;
         } else if ui.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
-            let _ = self.scroll_lines(1, rows, wrap_cols);
+            self.scroll_lines(1, rows, wrap_cols)?;
         } else if ui.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
-            let _ = self.scroll_lines(-1, rows, wrap_cols);
+            self.scroll_lines(-1, rows, wrap_cols)?;
         } else if ui.input(|input| input.key_pressed(egui::Key::Home)) {
             self.offset = 0;
             self.prepared_for = None;
-            let _ = self.ensure_window(rows, wrap_cols);
+            self.ensure_window(rows, wrap_cols)?;
         } else if ui.input(|input| input.key_pressed(egui::Key::End)) {
-            let _ = self.scroll_to_end(rows, wrap_cols);
+            self.scroll_to_end(rows, wrap_cols)?;
         }
+        Ok(())
     }
 
     fn ensure_window(&mut self, rows: usize, wrap_cols: usize) -> Result<(), FileError> {

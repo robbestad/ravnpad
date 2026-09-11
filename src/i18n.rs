@@ -157,6 +157,7 @@ pub struct UiText {
     pub view_readonly: &'static str,
     pub cannot_open: &'static str,
     pub cannot_save: &'static str,
+    pub cannot_save_settings: &'static str,
     pub cannot_read: &'static str,
     pub invalid_utf8: &'static str,
     pub invalid_rtf: &'static str,
@@ -194,6 +195,10 @@ impl UiText {
 
     pub fn save_error(&self, err: &std::io::Error) -> String {
         format!("{}:\n{err}", self.cannot_save)
+    }
+
+    pub fn settings_error(&self, err: &std::io::Error) -> String {
+        format!("{}:\n{err}", self.cannot_save_settings)
     }
 
     pub fn update_available(&self, new: &str, current: &str) -> String {
@@ -258,6 +263,7 @@ const EN: UiText = UiText {
     view_readonly: "view (read-only)",
     cannot_open: "Could not open the file",
     cannot_save: "Could not save the file",
+    cannot_save_settings: "Could not save the settings",
     cannot_read: "Could not read the file",
     invalid_utf8: "The file is not valid UTF-8 text.",
     invalid_rtf: "Could not convert the RTF file to text.",
@@ -302,6 +308,7 @@ const NB: UiText = UiText {
     view_readonly: "visning (skrivebeskyttet)",
     cannot_open: "Kunne ikke åpne filen",
     cannot_save: "Kunne ikke lagre filen",
+    cannot_save_settings: "Kunne ikke lagre innstillingene",
     cannot_read: "Kunne ikke lese filen",
     invalid_utf8: "Filen er ikke gyldig UTF-8-tekst.",
     invalid_rtf: "Kunne ikke konvertere RTF-filen til tekst.",
@@ -346,6 +353,7 @@ const NN: UiText = UiText {
     view_readonly: "vising (skriveverna)",
     cannot_open: "Kunne ikkje opne fila",
     cannot_save: "Kunne ikkje lagre fila",
+    cannot_save_settings: "Kunne ikkje lagre innstillingane",
     cannot_read: "Kunne ikkje lese fila",
     invalid_utf8: "Fila er ikkje gyldig UTF-8-tekst.",
     invalid_rtf: "Kunne ikkje konvertere RTF-fila til tekst.",
@@ -390,6 +398,7 @@ const SV: UiText = UiText {
     view_readonly: "visning (skrivskyddad)",
     cannot_open: "Kunde inte öppna filen",
     cannot_save: "Kunde inte spara filen",
+    cannot_save_settings: "Kunde inte spara inställningarna",
     cannot_read: "Kunde inte läsa filen",
     invalid_utf8: "Filen är inte giltig UTF-8-text.",
     invalid_rtf: "Kunde inte konvertera RTF-filen till text.",
@@ -434,6 +443,7 @@ const DA: UiText = UiText {
     view_readonly: "visning (skrivebeskyttet)",
     cannot_open: "Kunne ikke åbne filen",
     cannot_save: "Kunne ikke gemme filen",
+    cannot_save_settings: "Kunne ikke gemme indstillingerne",
     cannot_read: "Kunne ikke læse filen",
     invalid_utf8: "Filen er ikke gyldig UTF-8-tekst.",
     invalid_rtf: "Kunne ikke konvertere RTF-filen til tekst.",
@@ -478,6 +488,7 @@ const DE: UiText = UiText {
     view_readonly: "Ansicht (schreibgeschützt)",
     cannot_open: "Datei konnte nicht geöffnet werden",
     cannot_save: "Datei konnte nicht gespeichert werden",
+    cannot_save_settings: "Einstellungen konnten nicht gespeichert werden",
     cannot_read: "Datei konnte nicht gelesen werden",
     invalid_utf8: "Die Datei ist kein gültiger UTF-8-Text.",
     invalid_rtf: "Die RTF-Datei konnte nicht in Text umgewandelt werden.",
@@ -522,6 +533,7 @@ const NL: UiText = UiText {
     view_readonly: "weergave (alleen-lezen)",
     cannot_open: "Kan het bestand niet openen",
     cannot_save: "Kan het bestand niet opslaan",
+    cannot_save_settings: "Kan de instellingen niet opslaan",
     cannot_read: "Kan het bestand niet lezen",
     invalid_utf8: "Het bestand is geen geldige UTF-8-tekst.",
     invalid_rtf: "Het RTF-bestand kon niet naar tekst worden omgezet.",
@@ -566,6 +578,7 @@ const FR: UiText = UiText {
     view_readonly: "affichage (lecture seule)",
     cannot_open: "Impossible d’ouvrir le fichier",
     cannot_save: "Impossible d’enregistrer le fichier",
+    cannot_save_settings: "Impossible d’enregistrer les paramètres",
     cannot_read: "Impossible de lire le fichier",
     invalid_utf8: "Le fichier n’est pas un texte UTF-8 valide.",
     invalid_rtf: "Impossible de convertir le fichier RTF en texte.",
@@ -610,6 +623,7 @@ const ES: UiText = UiText {
     view_readonly: "vista (solo lectura)",
     cannot_open: "No se pudo abrir el archivo",
     cannot_save: "No se pudo guardar el archivo",
+    cannot_save_settings: "No se pudieron guardar los ajustes",
     cannot_read: "No se pudo leer el archivo",
     invalid_utf8: "El archivo no es texto UTF-8 válido.",
     invalid_rtf: "No se pudo convertir el archivo RTF a texto.",
@@ -654,6 +668,7 @@ const IT: UiText = UiText {
     view_readonly: "visualizzazione (sola lettura)",
     cannot_open: "Impossibile aprire il file",
     cannot_save: "Impossibile salvare il file",
+    cannot_save_settings: "Impossibile salvare le impostazioni",
     cannot_read: "Impossibile leggere il file",
     invalid_utf8: "Il file non è testo UTF-8 valido.",
     invalid_rtf: "Impossibile convertire il file RTF in testo.",
@@ -698,6 +713,7 @@ const PT: UiText = UiText {
     view_readonly: "visualização (só de leitura)",
     cannot_open: "Não foi possível abrir o ficheiro",
     cannot_save: "Não foi possível guardar o ficheiro",
+    cannot_save_settings: "Não foi possível guardar as definições",
     cannot_read: "Não foi possível ler o ficheiro",
     invalid_utf8: "O ficheiro não é texto UTF-8 válido.",
     invalid_rtf: "Não foi possível converter o ficheiro RTF em texto.",
@@ -742,6 +758,7 @@ const FI: UiText = UiText {
     view_readonly: "näkymä (vain luku)",
     cannot_open: "Tiedostoa ei voitu avata",
     cannot_save: "Tiedostoa ei voitu tallentaa",
+    cannot_save_settings: "Asetuksia ei voitu tallentaa",
     cannot_read: "Tiedostoa ei voitu lukea",
     invalid_utf8: "Tiedosto ei ole kelvollista UTF-8-tekstiä.",
     invalid_rtf: "RTF-tiedostoa ei voitu muuntaa tekstiksi.",
@@ -786,6 +803,7 @@ const PL: UiText = UiText {
     view_readonly: "widok (tylko do odczytu)",
     cannot_open: "Nie można otworzyć pliku",
     cannot_save: "Nie można zapisać pliku",
+    cannot_save_settings: "Nie można zapisać ustawień",
     cannot_read: "Nie można odczytać pliku",
     invalid_utf8: "Plik nie jest poprawnym tekstem UTF-8.",
     invalid_rtf: "Nie można przekonwertować pliku RTF na tekst.",
@@ -830,6 +848,7 @@ const IS: UiText = UiText {
     view_readonly: "sýn (skrifvarið)",
     cannot_open: "Gat ekki opnað skrána",
     cannot_save: "Gat ekki vistað skrána",
+    cannot_save_settings: "Gat ekki vistað stillingarnar",
     cannot_read: "Gat ekki lesið skrána",
     invalid_utf8: "Skráin er ekki gildur UTF-8-texti.",
     invalid_rtf: "Gat ekki umbreytt RTF-skránni í texta.",
@@ -874,6 +893,7 @@ const CS: UiText = UiText {
     view_readonly: "zobrazení (jen ke čtení)",
     cannot_open: "Soubor se nepodařilo otevřít",
     cannot_save: "Soubor se nepodařilo uložit",
+    cannot_save_settings: "Nastavení se nepodařilo uložit",
     cannot_read: "Soubor se nepodařilo přečíst",
     invalid_utf8: "Soubor není platný text UTF-8.",
     invalid_rtf: "Soubor RTF se nepodařilo převést na text.",

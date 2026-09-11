@@ -46,19 +46,20 @@ impl Prefs {
         prefs
     }
 
-    pub fn save(&self) {
-        if let Some(path) = settings_path() {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let body = format!(
-                "lang={}\nfont={}\nsize={}\n",
-                self.lang.code(),
-                self.font,
-                self.size
-            );
-            let _ = std::fs::write(path, body);
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        let Some(path) = settings_path() else {
+            return Ok(());
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
         }
+        let body = format!(
+            "lang={}\nfont={}\nsize={}\n",
+            self.lang.code(),
+            self.font,
+            self.size
+        );
+        std::fs::write(path, body)
     }
 }
 
