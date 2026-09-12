@@ -1077,3 +1077,147 @@ mod tests {
         assert_eq!(codes.len(), Lang::ALL.len());
     }
 }
+
+pub struct IoText {
+    pub busy: &'static str,
+    pub recovery: &'static str,
+    pub description: &'static str,
+    pub restore: &'static str,
+    pub delete: &'static str,
+    pub conflict: &'static str,
+}
+
+impl Lang {
+    pub fn io_text(self) -> IoText {
+        let [busy, recovery, description, restore, delete, conflict] = match self {
+            Self::Bokmal => [
+                "Leser / lagrer…",
+                "Gjenoppretting",
+                "Ulagrede kopier fra tidligere økter",
+                "Gjenopprett",
+                "Slett",
+                "Filen er endret utenfor RavnPad. Åpne den på nytt, eller bruk Lagre som med et nytt filnavn.",
+            ],
+            Self::Nynorsk => [
+                "Les / lagrar…",
+                "Gjenoppretting",
+                "Ulagra kopiar frå tidlegare økter",
+                "Gjenopprett",
+                "Slett",
+                "Fila er endra utanfor RavnPad. Opne henne på nytt, eller bruk Lagre som med eit nytt filnamn.",
+            ],
+            Self::Swedish => [
+                "Läser / sparar…",
+                "Återställning",
+                "Osparade kopior från tidigare sessioner",
+                "Återställ",
+                "Ta bort",
+                "Filen har ändrats utanför RavnPad. Öppna den igen eller spara med ett nytt filnamn.",
+            ],
+            Self::Danish => [
+                "Læser / gemmer…",
+                "Gendannelse",
+                "Ikke-gemte kopier fra tidligere sessioner",
+                "Gendan",
+                "Slet",
+                "Filen er ændret uden for RavnPad. Åbn den igen, eller gem med et nyt filnavn.",
+            ],
+            Self::German => [
+                "Lesen / Speichern…",
+                "Wiederherstellung",
+                "Ungespeicherte Kopien früherer Sitzungen",
+                "Wiederherstellen",
+                "Löschen",
+                "Die Datei wurde außerhalb von RavnPad geändert. Öffnen Sie sie erneut oder speichern Sie unter einem neuen Namen.",
+            ],
+            Self::Dutch => [
+                "Lezen / opslaan…",
+                "Herstel",
+                "Niet-opgeslagen kopieën van eerdere sessies",
+                "Herstellen",
+                "Verwijderen",
+                "Het bestand is buiten RavnPad gewijzigd. Open het opnieuw of sla het op onder een nieuwe naam.",
+            ],
+            Self::French => [
+                "Lecture / enregistrement…",
+                "Récupération",
+                "Copies non enregistrées de sessions précédentes",
+                "Restaurer",
+                "Supprimer",
+                "Le fichier a été modifié en dehors de RavnPad. Rouvrez-le ou enregistrez-le sous un nouveau nom.",
+            ],
+            Self::Spanish => [
+                "Leyendo / guardando…",
+                "Recuperación",
+                "Copias sin guardar de sesiones anteriores",
+                "Restaurar",
+                "Eliminar",
+                "El archivo se ha modificado fuera de RavnPad. Ábralo de nuevo o guárdelo con otro nombre.",
+            ],
+            Self::Italian => [
+                "Lettura / salvataggio…",
+                "Ripristino",
+                "Copie non salvate di sessioni precedenti",
+                "Ripristina",
+                "Elimina",
+                "Il file è stato modificato fuori da RavnPad. Riaprilo o salvalo con un nuovo nome.",
+            ],
+            Self::Portuguese => [
+                "A ler / guardar…",
+                "Recuperação",
+                "Cópias não guardadas de sessões anteriores",
+                "Restaurar",
+                "Eliminar",
+                "O ficheiro foi alterado fora do RavnPad. Abra-o novamente ou guarde-o com outro nome.",
+            ],
+            Self::Finnish => [
+                "Luetaan / tallennetaan…",
+                "Palautus",
+                "Aiempien istuntojen tallentamattomat kopiot",
+                "Palauta",
+                "Poista",
+                "Tiedostoa on muutettu RavnPadin ulkopuolella. Avaa se uudelleen tai tallenna uudella nimellä.",
+            ],
+            Self::Polish => [
+                "Odczyt / zapis…",
+                "Odzyskiwanie",
+                "Niezapisane kopie z poprzednich sesji",
+                "Przywróć",
+                "Usuń",
+                "Plik został zmieniony poza RavnPad. Otwórz go ponownie lub zapisz pod nową nazwą.",
+            ],
+            Self::Icelandic => [
+                "Les / vista…",
+                "Endurheimt",
+                "Óvistaðar afrit úr fyrri lotum",
+                "Endurheimta",
+                "Eyða",
+                "Skránni var breytt utan RavnPad. Opnaðu hana aftur eða vistaðu með nýju nafni.",
+            ],
+            Self::Czech => [
+                "Čtení / ukládání…",
+                "Obnovení",
+                "Neuložené kopie z předchozích relací",
+                "Obnovit",
+                "Smazat",
+                "Soubor byl změněn mimo RavnPad. Otevřete jej znovu nebo uložte pod novým názvem.",
+            ],
+            Self::English => [
+                "Reading / saving…",
+                "Recovery",
+                "Unsaved copies from earlier sessions",
+                "Restore",
+                "Delete",
+                "The file changed outside RavnPad. Reopen it, or use Save As with a new filename.",
+            ],
+        };
+        IoText {
+            busy,
+            recovery,
+            description,
+            restore,
+            delete,
+            conflict,
+        }
+    }
+}

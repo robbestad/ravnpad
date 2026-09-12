@@ -180,15 +180,31 @@ pub fn misspellings(
     visible: std::ops::Range<usize>,
 ) -> Vec<Miss> {
     let mut checked = std::collections::HashMap::new();
-    word_spans(text)
+    let mut start = (0, 0);
+    let mut end = text.len();
+    for (cchar, (byte, ch)) in text.char_indices().enumerate() {
+        let separator =
+            !(ch.is_alphanumeric() || ch == '\'' || ch == '’' || SEPARATORS.contains(&ch));
+        if separator && cchar < visible.start {
+            start = (cchar + 1, byte + ch.len_utf8());
+        }
+        if separator && cchar >= visible.end {
+            end = byte;
+            break;
+        }
+    }
+    word_spans(&text[start.1..end])
         .into_iter()
+        .map(|(cchar, byte, word)| (cchar + start.0, byte + start.1, word))
         .take_while(|(cchar, _, _)| *cchar < visible.end)
         .filter_map(|(cchar, byte, word)| {
             let len = word.chars().count();
             if cchar + len <= visible.start {
                 return None;
             }
-            let correct = *checked.entry(word).or_insert_with(|| is_correct(word, dict));
+            let correct = *checked
+                .entry(word)
+                .or_insert_with(|| is_correct(word, dict));
             (!correct).then_some(Miss { cchar, byte, len })
         })
         .collect()
