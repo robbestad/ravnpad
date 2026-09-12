@@ -166,7 +166,10 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
         case WM_HSCROLL: if((HWND)l==position&&LOWORD(w)==TB_ENDTRACK) rp_view(SendMessageW(position,TBM_GETPOS,0,0)/1000.0); return 0;
         case WM_COMMAND:
             if((HWND)l==editor&&HIWORD(w)==EN_CHANGE) { if(!updating) { documentDirty=1; rp_changed(); } }
-            else if(!busy) command(LOWORD(w)); return 0;
+            // Child notifications carry their HWND in lParam. Only menus and
+            // accelerators have lParam == 0; the editor ID overlaps RP_NEW.
+            else if(l==0 && HIWORD(w)<=1 && !busy) command(LOWORD(w));
+            return 0;
         case WM_DROPFILES: {
             HDROP drop=(HDROP)w; UINT count=DragQueryFileW(drop,0xffffffff,NULL,0);
             for(UINT i=0;i<count;i++) { UINT len=DragQueryFileW(drop,i,NULL,0); wchar_t *path=calloc((size_t)len+1,sizeof(wchar_t)); if(path) { DragQueryFileW(drop,i,path,len+1); char *p=utf8(path); if(p) { rp_open(p); free(p); } free(path); } }
@@ -206,6 +209,29 @@ void rp_run(void) {
         SendMessageW(editor,EM_REDO,0,0);
         copy=rp_copy_text(&length); valid=valid && copy && length>0 && copy[length-1]=='!'; rp_free_text(copy);
         rp_document("next",4,1); valid=valid && !SendMessageW(editor,EM_CANUNDO,0,0);
+        // Exercise a document larger than 200 KB through real Rich Edit scrolling.
+        const char *line="Scrolling must preserve this document: abcdefghijklmnopqrstuvwxyz\n";
+        size_t lineLength=strlen(line), largeLength=lineLength*5000;
+        char *large=malloc(largeLength+1);
+        if(!large) valid=0;
+        else {
+            for(size_t i=0;i<5000;i++)memcpy(large+i*lineLength,line,lineLength);
+            large[largeLength]=0;
+            rp_document(large,largeLength,0);
+            rp_preferences("Consolas",15,0,0);
+            ShowWindow(window,SW_SHOWNOACTIVATE); UpdateWindow(window);
+            SendMessageW(editor,WM_VSCROLL,SB_PAGEDOWN,0);
+            SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-WHEEL_DELTA),0);
+            SendMessageW(editor,WM_VSCROLL,SB_BOTTOM,0);
+            SendMessageW(editor,WM_VSCROLL,SB_TOP,0);
+            // Notifications must never enqueue RP_NEW (editor control ID 1).
+            const WORD notifications[]={EN_VSCROLL,EN_HSCROLL,EN_SETFOCUS,EN_KILLFOCUS,EN_UPDATE};
+            for(size_t i=0;i<sizeof(notifications)/sizeof(notifications[0]);i++)
+                SendMessageW(window,WM_COMMAND,MAKEWPARAM(1,notifications[i]),(LPARAM)editor);
+            copy=rp_copy_text(&length);
+            valid=valid && copy && length==largeLength && memcmp(copy,large,largeLength)==0;
+            rp_free_text(copy); free(large);
+        }
         smokeResult=valid?0:1; fprintf(stderr,"Native Win32 smoke test: %s\n",valid?"PASS":"FAIL");
         DestroyWindow(window); if(font)DeleteObject(font); FreeLibrary(rich); OleUninitialize(); return;
     }
