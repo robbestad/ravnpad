@@ -1,11 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
 
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Key, KeyboardShortcut, Layout, Modifiers, PointerButton,
@@ -24,8 +22,10 @@ mod large;
 mod macopen;
 mod native_dialog;
 mod prefs;
+mod recovery;
 mod rtf;
 mod spell;
+mod storage;
 mod update;
 
 const APP_NAME: &str = "RavnPad";
@@ -98,6 +98,7 @@ enum Action {
     SaveAs,
     Quit,
     OpenPath(PathBuf),
+    Recover(PathBuf),
     OpenBytes(String),
     CheckUpdate,
     InstallUpdate { url: String },
@@ -124,9 +125,29 @@ enum SpellEvent {
     Failed(spell::SpellError),
 }
 
+enum FileEvent {
+    Open(PathBuf, Result<large::Opened, large::FileError>),
+    Save(PathBuf, String, io::Result<()>),
+}
+
 struct RavnPad {
+    file_tx: Sender<FileEvent>,
+    file_rx: Receiver<FileEvent>,
+    file_busy: bool,
+    recovery: recovery::Recovery,
+    recovery_candidates: Vec<recovery::Candidate>,
+    recovery_due: Option<std::time::Instant>,
+    recovered_from: Option<PathBuf>,
+    after_save: Option<Action>,
+    ctx: egui::Context,
     text: String,
     saved_text: String,
+    cache_valid: bool,
+    dirty: bool,
+    converted: bool,
+    counts: (usize, usize),
+    cached_query: String,
+    cached_matches: std::sync::Arc<Vec<FindMatch>>,
     path: Option<PathBuf>,
     large: Option<large::LargeView>,
     prefs: prefs::Prefs,
@@ -136,9 +157,10 @@ struct RavnPad {
     last_size: egui::Vec2,
     confirm: Option<Action>,
     error: Option<AppError>,
-    update_tx: Sender<UpdateEvent>,
-    update_rx: Receiver<UpdateEvent>,
+    update_tx: Sender<(u64, UpdateEvent)>,
+    update_rx: Receiver<(u64, UpdateEvent)>,
     update: UpdateUi,
+    update_generation: u64,
     restarting: bool,
     find_open: bool,
     find_query: String,
@@ -151,8 +173,9 @@ struct RavnPad {
     spell_dirty: bool,
     spell_visible: std::ops::Range<usize>,
     spell_menu: Option<FindMatch>,
-    spell_tx: Sender<SpellEvent>,
-    spell_rx: Receiver<SpellEvent>,
+    spell_generation: u64,
+    spell_tx: Sender<(u64, SpellEvent)>,
+    spell_rx: Receiver<(u64, SpellEvent)>,
     #[cfg(target_os = "macos")]
     pending_opens: std::collections::VecDeque<PathBuf>,
 }
@@ -177,10 +200,26 @@ impl RavnPad {
         fonts::apply(&cc.egui_ctx, &prefs.font, prefs.size, &font_list);
         let (update_tx, update_rx) = mpsc::channel();
         let (spell_tx, spell_rx) = mpsc::channel();
+        let (file_tx, file_rx) = mpsc::channel();
 
         let mut app = Self {
+            file_tx,
+            file_rx,
+            file_busy: false,
+            after_save: None,
+            recovery: recovery::Recovery::start(cc.egui_ctx.clone()),
+            recovery_candidates: Vec::new(),
+            recovery_due: None,
+            recovered_from: None,
+            ctx: cc.egui_ctx.clone(),
             text: String::new(),
             saved_text: String::new(),
+            cache_valid: false,
+            dirty: false,
+            converted: false,
+            counts: (0, 0),
+            cached_query: String::new(),
+            cached_matches: std::sync::Arc::new(Vec::new()),
             path: None,
             large: None,
             prefs,
@@ -193,6 +232,7 @@ impl RavnPad {
             update_tx,
             update_rx,
             update: UpdateUi::Idle,
+            update_generation: 0,
             restarting: false,
             find_open: false,
             find_query: String::new(),
@@ -205,6 +245,7 @@ impl RavnPad {
             spell_dirty: false,
             spell_visible: 0..0,
             spell_menu: None,
+            spell_generation: 0,
             spell_tx,
             spell_rx,
             #[cfg(target_os = "macos")]
@@ -281,6 +322,9 @@ impl RavnPad {
     }
 
     fn start_spellcheck(&mut self) {
+        self.spell_generation += 1;
+        let generation = self.spell_generation;
+        let ctx = self.ctx.clone();
         self.spell = SpellState::Loading;
         let lang = self.prefs.lang;
         let tx = self.spell_tx.clone();
@@ -289,11 +333,13 @@ impl RavnPad {
                 Ok(dict) => SpellEvent::Loaded(dict),
                 Err(err) => SpellEvent::Failed(err),
             };
-            let _ = tx.send(event);
+            let _ = tx.send((generation, event));
+            ctx.request_repaint();
         });
     }
 
     fn stop_spellcheck(&mut self) {
+        self.spell_generation += 1;
         self.spell = SpellState::Off;
         self.spell_misses.clear();
     }
@@ -394,8 +440,33 @@ impl RavnPad {
         }
     }
 
+    fn refresh_document(&mut self) {
+        if !self.cache_valid {
+            self.dirty = self.converted || self.text != self.saved_text;
+            if self.dirty {
+                if self.recovery_due.is_none() {
+                    self.recovery_due =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                    self.ctx
+                        .request_repaint_after(std::time::Duration::from_secs(2));
+                }
+            } else {
+                self.clear_recovery();
+            }
+            self.counts = (
+                self.text.chars().count(),
+                self.text.split_whitespace().count(),
+            );
+        }
+        if !self.cache_valid || self.cached_query != self.find_query {
+            self.cached_matches = std::sync::Arc::new(find_matches(&self.text, &self.find_query));
+            self.cached_query.clone_from(&self.find_query);
+        }
+        self.cache_valid = true;
+    }
+
     fn is_dirty(&self) -> bool {
-        self.text != self.saved_text
+        self.dirty
     }
 
     fn display_name(&self) -> String {
@@ -418,6 +489,7 @@ impl RavnPad {
                 | Action::Open
                 | Action::Quit
                 | Action::OpenPath(_)
+                | Action::Recover(_)
                 | Action::OpenBytes(_)
                 | Action::InstallUpdate { .. }
         ) && self.is_dirty()
@@ -432,10 +504,13 @@ impl RavnPad {
         match action {
             Action::New => {
                 self.text.clear();
+                self.converted = false;
                 self.saved_text.clear();
+                self.dirty = false;
                 self.path = None;
                 self.large = None;
                 self.spell_dirty = true;
+                self.cache_valid = false;
             }
             Action::Open => {
                 if let Some(path) = self.pick_open_path() {
@@ -462,14 +537,31 @@ impl RavnPad {
                 // Close is sent from the caller that has Context.
             }
             Action::OpenPath(path) => self.open_path(path),
+            Action::Recover(path) => {
+                self.file_busy = true;
+                if self
+                    .recovery
+                    .tx
+                    .send(recovery::Command::Read(path))
+                    .is_err()
+                {
+                    self.file_busy = false;
+                    self.error = Some(AppError::Settings(io::Error::other("Recovery unavailable")));
+                }
+            }
             Action::OpenBytes(text) => {
                 self.large = None;
                 self.text = text;
+                self.converted = false;
                 self.saved_text.clone_from(&self.text);
                 self.path = None;
                 self.spell_dirty = true;
+                self.cache_valid = false;
             }
             Action::CheckUpdate => {
+                if matches!(self.update, UpdateUi::Downloading) {
+                    return;
+                }
                 self.update = UpdateUi::Checking { user: true };
                 self.spawn_update_check(true);
             }
@@ -477,7 +569,10 @@ impl RavnPad {
         }
     }
 
-    fn spawn_update_check(&self, user: bool) {
+    fn spawn_update_check(&mut self, user: bool) {
+        self.update_generation += 1;
+        let generation = self.update_generation;
+        let ctx = self.ctx.clone();
         let tx = self.update_tx.clone();
         thread::spawn(move || {
             let event = if update::asset_name().is_none() {
@@ -493,12 +588,16 @@ impl RavnPad {
                 }
             };
             if let Some(event) = event {
-                let _ = tx.send(event);
+                let _ = tx.send((generation, event));
+                ctx.request_repaint();
             }
         });
     }
 
     fn spawn_install(&mut self, url: String) {
+        self.update_generation += 1;
+        let generation = self.update_generation;
+        let ctx = self.ctx.clone();
         self.update = UpdateUi::Downloading;
         let tx = self.update_tx.clone();
         thread::spawn(move || {
@@ -506,17 +605,22 @@ impl RavnPad {
                 Ok(restart) => UpdateEvent::Ready(restart),
                 Err(err) => UpdateEvent::Failed(err.to_string()),
             };
-            let _ = tx.send(event);
+            let _ = tx.send((generation, event));
+            ctx.request_repaint();
         });
     }
 
     fn poll_spell(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = self.spell_rx.try_recv() {
+        while let Ok((generation, event)) = self.spell_rx.try_recv() {
+            if generation != self.spell_generation || !self.prefs.spellcheck {
+                continue;
+            }
             match event {
                 SpellEvent::Loaded(dict) => {
                     if self.prefs.spellcheck {
                         self.spell = SpellState::Ready(dict);
                         self.spell_dirty = true;
+                        self.cache_valid = false;
                     }
                 }
                 SpellEvent::Failed(err) => {
@@ -532,7 +636,10 @@ impl RavnPad {
     }
 
     fn poll_update(&mut self, ctx: &egui::Context) -> Option<Action> {
-        while let Ok(event) = self.update_rx.try_recv() {
+        while let Ok((generation, event)) = self.update_rx.try_recv() {
+            if generation != self.update_generation {
+                continue;
+            }
             match event {
                 UpdateEvent::Available { version, url } => {
                     self.update = UpdateUi::Available { version, url };
@@ -694,8 +801,8 @@ impl RavnPad {
         let Some(path) = self.pick_save_path() else {
             return false;
         };
-        self.path = Some(path);
-        self.write_current()
+        self.begin_save(path);
+        true
     }
 
     fn pick_open_path(&self) -> Option<PathBuf> {
@@ -725,14 +832,27 @@ impl RavnPad {
     }
 
     fn open_path(&mut self, path: PathBuf) {
-        match large::open(&path) {
+        self.file_busy = true;
+        let tx = self.file_tx.clone();
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            let result = large::open(&path);
+            let _ = tx.send(FileEvent::Open(path, result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn apply_open(&mut self, path: PathBuf, result: Result<large::Opened, large::FileError>) {
+        match result {
             Ok(large::Opened::Edit(text)) => {
+                self.converted = false;
                 self.large = None;
                 self.text = text;
                 self.saved_text.clone_from(&self.text);
                 self.path = Some(path);
             }
             Ok(large::Opened::View(view)) => {
+                self.converted = false;
                 self.text.clear();
                 self.saved_text.clear();
                 self.large = Some(view);
@@ -741,18 +861,16 @@ impl RavnPad {
             Ok(large::Opened::Converted { text, txt_path }) => {
                 self.large = None;
                 self.text = text;
-                self.path = Some(txt_path.clone());
-                match save_text(&txt_path, &self.text) {
-                    Ok(()) => self.saved_text.clone_from(&self.text),
-                    Err(err) => {
-                        self.saved_text.clear();
-                        self.error = Some(AppError::Save(err));
-                    }
-                }
+                let _ = txt_path;
+                // Conversion must never write a sibling .txt file just by opening RTF.
+                self.path = None;
+                self.saved_text.clear();
+                self.converted = true;
             }
             Err(err) => self.error = Some(AppError::File(err)),
         }
         self.spell_dirty = true;
+        self.cache_valid = false;
     }
 
     fn write_current(&mut self) -> bool {
@@ -763,14 +881,102 @@ impl RavnPad {
         let Some(path) = &self.path else {
             return false;
         };
-        match save_text(path, &self.text) {
-            Ok(()) => {
-                self.saved_text.clone_from(&self.text);
-                true
+        self.begin_save(path.clone());
+        true
+    }
+
+    fn begin_save(&mut self, path: PathBuf) {
+        self.file_busy = true;
+        let text = self.text.clone();
+        let expected = if self.path.as_ref() == Some(&path) {
+            Some(self.saved_text.as_bytes().to_vec())
+        } else {
+            None
+        };
+        let tx = self.file_tx.clone();
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            let result = match expected {
+                Some(expected) => storage::save_checked(&path, text.as_bytes(), Some(&expected)),
+                // The native Save As dialog confirms replacement of an existing file.
+                None => save_text(&path, &text),
+            };
+            let _ = tx.send(FileEvent::Save(path, text, result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn clear_recovery(&mut self) {
+        self.recovery_due = None;
+        if let Some(path) = self.recovered_from.take() {
+            let _ = self.recovery.tx.send(recovery::Command::Delete(path));
+        }
+        let _ = self.recovery.tx.send(recovery::Command::Snapshot(None));
+    }
+
+    fn poll_recovery(&mut self) {
+        while let Ok(event) = self.recovery.rx.try_recv() {
+            match event {
+                recovery::Event::Available(paths) => self.recovery_candidates = paths,
+                recovery::Event::Restored(path, text) => {
+                    self.recovered_from = Some(path);
+                    self.file_busy = false;
+                    self.text = text;
+                    self.saved_text.clear();
+                    self.path = None;
+                    self.large = None;
+                    self.converted = true;
+                    self.cache_valid = false;
+                    self.spell_dirty = true;
+                    self.recovery_candidates.clear();
+                }
+                recovery::Event::Failed(e) => self.error = Some(AppError::Settings(e)),
+                recovery::Event::ReadFailed(e) => {
+                    self.file_busy = false;
+                    self.error = Some(AppError::Settings(e));
+                }
             }
-            Err(err) => {
-                self.error = Some(AppError::Save(err));
-                false
+        }
+        if let Some(due) = self.recovery_due {
+            if std::time::Instant::now() >= due {
+                let _ = self
+                    .recovery
+                    .tx
+                    .send(recovery::Command::Snapshot(Some(self.text.clone())));
+                self.recovery_due = None;
+            } else {
+                self.ctx.request_repaint_after(
+                    due.saturating_duration_since(std::time::Instant::now()),
+                );
+            }
+        }
+    }
+
+    fn poll_files(&mut self) {
+        while let Ok(event) = self.file_rx.try_recv() {
+            self.file_busy = false;
+            match event {
+                FileEvent::Open(path, result) => self.apply_open(path, result),
+                FileEvent::Save(path, text, result) => match result {
+                    Ok(()) => {
+                        self.path = Some(path);
+                        self.converted = false;
+                        self.saved_text = text;
+                        self.cache_valid = false;
+                        self.refresh_document();
+                        if let Some(action) = self.after_save.take() {
+                            if matches!(action, Action::Quit) {
+                                self.ctx.send_viewport_cmd(ViewportCommand::Close);
+                            } else {
+                                self.execute(action);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.after_save = None;
+                        self.error = Some(AppError::Save(err));
+                    }
+                },
             }
         }
     }
@@ -877,6 +1083,19 @@ impl RavnPad {
 
 impl eframe::App for RavnPad {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_recovery();
+        self.poll_files();
+        self.refresh_document();
+        if self.file_busy {
+            if ctx.input(|i| i.viewport().close_requested()) {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            }
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.spinner();
+                ui.label(self.prefs.lang.io_text().busy);
+            });
+            return;
+        }
         avoid_broken_fullscreen(ctx);
         repaint_on_resize(ctx, &mut self.last_size);
 
@@ -889,6 +1108,38 @@ impl eframe::App for RavnPad {
         }
 
         let t = self.t();
+        if !self.recovery_candidates.is_empty() {
+            let labels = self.prefs.lang.io_text();
+            let mut restore = None;
+            let mut delete = None;
+            let mut recovery_open = true;
+            egui::Window::new(labels.recovery)
+                .open(&mut recovery_open)
+                .show(ctx, |ui| {
+                    ui.label(labels.description);
+                    for (i, candidate) in self.recovery_candidates.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(&candidate.preview);
+                            if ui.button(labels.restore).clicked() {
+                                restore = Some(candidate.path.clone());
+                            }
+                            if ui.button(labels.delete).clicked() {
+                                delete = Some(i);
+                            }
+                        });
+                    }
+                });
+            if !recovery_open {
+                self.recovery_candidates.clear();
+            }
+            if let Some(path) = restore {
+                action = Some(Action::Recover(path));
+            }
+            if let Some(i) = delete {
+                let path = self.recovery_candidates.remove(i).path;
+                let _ = self.recovery.tx.send(recovery::Command::Delete(path));
+            }
+        }
         egui::TopBottomPanel::top("meny").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button(t.file_menu, |ui| {
@@ -933,9 +1184,9 @@ impl eframe::App for RavnPad {
         });
 
         let mut matches = if self.find_open && self.large.is_none() {
-            find_matches(&self.text, &self.find_query)
+            self.cached_matches.clone()
         } else {
-            Vec::new()
+            std::sync::Arc::new(Vec::new())
         };
         self.find_index = self.find_index.min(matches.len().saturating_sub(1));
 
@@ -961,7 +1212,7 @@ impl eframe::App for RavnPad {
                     }
                     if query.changed() {
                         self.find_index = 0;
-                        matches = find_matches(&self.text, &self.find_query);
+                        matches = std::sync::Arc::new(find_matches(&self.text, &self.find_query));
                         if let Some(m) = matches.first().copied() {
                             self.goto_match(ctx, m);
                         }
@@ -1002,7 +1253,8 @@ impl eframe::App for RavnPad {
                             &self.replace_with,
                         );
                         self.spell_dirty = true;
-                        matches = find_matches(&self.text, &self.find_query);
+                        self.cache_valid = false;
+                        matches = std::sync::Arc::new(find_matches(&self.text, &self.find_query));
                         self.find_index = self.find_index.min(matches.len().saturating_sub(1));
                         if let Some(next) = matches.get(self.find_index).copied() {
                             self.goto_match(ctx, next);
@@ -1011,7 +1263,8 @@ impl eframe::App for RavnPad {
                     if ui.button(t.replace_all).clicked() && !self.find_query.is_empty() {
                         self.text = self.text.replace(&self.find_query, &self.replace_with);
                         self.spell_dirty = true;
-                        matches = find_matches(&self.text, &self.find_query);
+                        self.cache_valid = false;
+                        matches = std::sync::Arc::new(find_matches(&self.text, &self.find_query));
                         self.find_index = 0;
                     }
                     if ui.button("✕").clicked() {
@@ -1038,8 +1291,8 @@ impl eframe::App for RavnPad {
                     } else {
                         ui.label(format!(
                             "{} · {}",
-                            t.chars(self.text.chars().count()),
-                            t.words(self.text.split_whitespace().count())
+                            t.chars(self.counts.0),
+                            t.words(self.counts.1)
                         ));
                     }
                 });
@@ -1084,6 +1337,9 @@ impl eframe::App for RavnPad {
                             .lock_focus(!dialog_busy)
                             .interactive(!dialog_busy)
                             .show(ui);
+                        if output.response.changed() {
+                            self.cache_valid = false;
+                        }
                         drag_scroll(ui, &output.response);
                         paint_matches(ui, &output, &matches, self.find_index);
                         if let SpellState::Ready(dict) = &self.spell {
@@ -1144,6 +1400,7 @@ impl eframe::App for RavnPad {
                                                     &suggestion,
                                                 );
                                                 self.spell_dirty = true;
+                                                self.cache_valid = false;
                                                 ui.close();
                                             }
                                         }
@@ -1157,6 +1414,7 @@ impl eframe::App for RavnPad {
                                             self.error = Some(AppError::Settings(err));
                                         }
                                         self.spell_dirty = true;
+                                        self.cache_valid = false;
                                         ui.close();
                                     }
                                 });
@@ -1178,6 +1436,7 @@ impl eframe::App for RavnPad {
 
         preview_drop(ctx, t.drop_to_open);
 
+        self.refresh_document();
         if let Some(pending) = self.confirm.take() {
             match native_dialog::unsaved(
                 t.unsaved_title,
@@ -1193,16 +1452,14 @@ impl eframe::App for RavnPad {
                         self.start_save()
                     };
                     if saved {
-                        if matches!(pending, Action::Quit) {
-                            ctx.send_viewport_cmd(ViewportCommand::Close);
-                        } else {
-                            self.execute(pending);
-                        }
+                        self.after_save = Some(pending);
                     }
                 }
                 native_dialog::Confirm::Discard => {
+                    self.clear_recovery();
                     if matches!(pending, Action::Quit) {
                         self.saved_text.clone_from(&self.text);
+                        self.dirty = false;
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     } else {
                         self.execute(pending);
@@ -1215,6 +1472,9 @@ impl eframe::App for RavnPad {
         if let Some(error) = self.error.take() {
             let message = match error {
                 AppError::File(err) => t.file_error(&err),
+                AppError::Save(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    self.prefs.lang.io_text().conflict.to_owned()
+                }
                 AppError::Save(err) => t.save_error(&err),
                 AppError::Settings(err) => t.settings_error(&err),
                 AppError::Dictionary(err) => t.dictionary_error(&err),
@@ -1294,12 +1554,17 @@ fn find_matches(text: &str, query: &str) -> Vec<FindMatch> {
 }
 
 // Include complete rows at both edges, including partially clipped rows.
-fn visible_chars(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput) -> std::ops::Range<usize> {
+fn visible_chars(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+) -> std::ops::Range<usize> {
     let clip = output.text_clip_rect.intersect(ui.clip_rect());
-    let top = output.galley
+    let top = output
+        .galley
         .cursor_from_pos(egui::vec2(-f32::MAX, clip.min.y - output.galley_pos.y))
         .index;
-    let bottom = output.galley
+    let bottom = output
+        .galley
         .cursor_from_pos(egui::vec2(f32::MAX, clip.max.y - output.galley_pos.y))
         .index;
     top..bottom.saturating_add(1)
@@ -1321,7 +1586,10 @@ fn paint_matches(
     let shift = output.galley_pos.to_vec2();
     let visible = visible_chars(ui, output);
     let start = matches.partition_point(|m| m.cchar + m.len < visible.start);
-    for (i, &m) in matches.iter().enumerate().skip(start)
+    for (i, &m) in matches
+        .iter()
+        .enumerate()
+        .skip(start)
         .take_while(|(_, m)| m.cchar < visible.end)
     {
         let fill = if i == current {
@@ -1443,60 +1711,7 @@ fn load_text(path: &std::path::Path) -> Result<String, String> {
 }
 
 fn save_text(path: &Path, text: &str) -> Result<(), io::Error> {
-    let bytes = text.as_bytes();
-    match write_all_path(path, bytes) {
-        Ok(()) => Ok(()),
-        Err(err) if is_transient_io(&err) => {
-            thread::sleep(Duration::from_millis(250));
-            write_all_path(path, bytes)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn write_all_path(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = open_for_save(path)?;
-    file.write_all(bytes)?;
-    file.flush()?;
-    let _ = file.sync_all();
-    Ok(())
-}
-
-fn open_for_save(path: &Path) -> io::Result<fs::File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE so SMB/AV
-        // scanners do not block overwrite.
-        options.share_mode(0x0000_0007);
-    }
-    options.open(path)
-}
-
-fn is_transient_io(err: &io::Error) -> bool {
-    matches!(
-        err.kind(),
-        io::ErrorKind::Interrupted
-            | io::ErrorKind::WouldBlock
-            | io::ErrorKind::TimedOut
-            | io::ErrorKind::UnexpectedEof
-            | io::ErrorKind::BrokenPipe
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted
-    ) || matches!(
-        err.raw_os_error(),
-        Some(
-            32 |  // ERROR_SHARING_VIOLATION
-            33 |  // ERROR_LOCK_VIOLATION
-            53 |  // ERROR_BAD_NETPATH
-            59 |  // ERROR_UNEXP_NET_ERR
-            64 |  // ERROR_NETNAME_DELETED
-            121 | // ERROR_SEM_TIMEOUT
-            1231 | 1232 | 1236
-        )
-    )
+    storage::save(path, text.as_bytes())
 }
 
 fn dialog_max_size(ctx: &egui::Context) -> egui::Vec2 {
@@ -1546,6 +1761,234 @@ fn avoid_broken_fullscreen(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    fn test_app(dir: &std::path::Path) -> super::RavnPad {
+        use super::*;
+        let ctx = egui::Context::default();
+        let prefs = prefs::Prefs {
+            lang: i18n::Lang::English,
+            font: String::new(),
+            size: 15.0,
+            spellcheck: true,
+        };
+        let (update_tx, update_rx) = mpsc::channel();
+        let (spell_tx, spell_rx) = mpsc::channel();
+        let (file_tx, file_rx) = mpsc::channel();
+        let app = RavnPad {
+            file_tx,
+            file_rx,
+            file_busy: false,
+            after_save: None,
+            recovery: recovery::Recovery::start_in(ctx.clone(), Some(dir.to_owned())),
+            recovery_candidates: Vec::new(),
+            recovery_due: None,
+            recovered_from: None,
+            ctx: ctx.clone(),
+            text: String::new(),
+            saved_text: String::new(),
+            cache_valid: false,
+            dirty: false,
+            converted: false,
+            counts: (0, 0),
+            cached_query: String::new(),
+            cached_matches: std::sync::Arc::new(Vec::new()),
+            path: None,
+            large: None,
+            prefs,
+            fonts: Vec::new(),
+            settings_open: false,
+            last_title: String::new(),
+            last_size: egui::Vec2::ZERO,
+            confirm: None,
+            error: None,
+            update_tx,
+            update_rx,
+            update: UpdateUi::Idle,
+            update_generation: 0,
+            restarting: false,
+            find_open: false,
+            find_query: String::new(),
+            replace_with: String::new(),
+            find_index: 0,
+            find_focus: false,
+            pending_goto: None,
+            spell: SpellState::Off,
+            spell_misses: Vec::new(),
+            spell_dirty: false,
+            spell_visible: 0..0,
+            spell_menu: None,
+            spell_generation: 0,
+            spell_tx,
+            spell_rx,
+            #[cfg(target_os = "macos")]
+            pending_opens: std::collections::VecDeque::new(),
+        };
+        app
+    }
+
+    #[test]
+    fn stale_dictionary_results_are_ignored() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path());
+        app.spell_generation = 2;
+        app.spell = SpellState::Loading;
+        app.spell_tx
+            .send((1, SpellEvent::Failed(spell::SpellError::Unavailable)))
+            .unwrap();
+        app.poll_spell(&app.ctx.clone());
+        assert!(matches!(app.spell, SpellState::Loading));
+        assert!(app.error.is_none());
+        let dict = spellbook::Dictionary::new("SET UTF-8\n", "1\nhello\n").unwrap();
+        app.spell_tx.send((2, SpellEvent::Loaded(dict))).unwrap();
+        app.poll_spell(&app.ctx.clone());
+        assert!(matches!(app.spell, SpellState::Ready(_)));
+    }
+
+    #[test]
+    fn failed_async_save_preserves_document_and_cancels_followup() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir.path().join("recovery"));
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "external change").unwrap();
+        app.path = Some(path.clone());
+        app.saved_text = "original".into();
+        app.text = "my edits".into();
+        app.after_save = Some(Action::New);
+        app.write_current();
+        let event = app
+            .file_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        app.file_tx.send(event).unwrap();
+        app.poll_files();
+        assert!(app.error.is_some());
+        assert!(app.after_save.is_none());
+        assert_eq!(app.text, "my edits");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "external change");
+    }
+
+    #[test]
+    fn async_save_finishes_before_followup() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir.path().join("recovery"));
+        let path = dir.path().join("note.txt");
+        app.text = "my edits".into();
+        app.after_save = Some(Action::New);
+        app.begin_save(path.clone());
+        assert_eq!(app.text, "my edits");
+        let event = app
+            .file_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        app.file_tx.send(event).unwrap();
+        app.poll_files();
+        assert!(app.text.is_empty());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "my edits");
+    }
+
+    #[test]
+    fn cached_dirty_state_recognizes_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path());
+        app.saved_text = "original".into();
+        app.text = "edited".into();
+        app.refresh_document();
+        assert!(app.is_dirty());
+        app.text = "original".into();
+        app.cache_valid = false;
+        app.refresh_document();
+        assert!(!app.is_dirty());
+        assert_eq!(app.counts, (8, 1));
+    }
+
+    #[test]
+    fn opening_rtf_never_overwrites_sibling_text() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir.path().join("recovery"));
+        let path = dir.path().join("note.rtf");
+        let txt = path.with_extension("txt");
+        std::fs::write(&txt, "existing").unwrap();
+        app.apply_open(
+            path,
+            Ok(large::Opened::Converted {
+                text: "converted".into(),
+                txt_path: txt.clone(),
+            }),
+        );
+        app.refresh_document();
+        assert!(app.is_dirty());
+        assert!(app.path.is_none());
+        assert_eq!(std::fs::read_to_string(txt).unwrap(), "existing");
+    }
+
+    #[test]
+    #[ignore = "manual release performance measurement"]
+    fn editor_performance() {
+        use eframe::egui;
+        for size in [200 * 1024, 1024 * 1024, 2 * 1024 * 1024] {
+            for long_line in [false, true] {
+                let unit = if long_line {
+                    "abcdefghij "
+                } else {
+                    "abcdefghij\n"
+                };
+                let mut text = unit.repeat(size / unit.len());
+                let ctx = egui::Context::default();
+                let mut samples = Vec::new();
+                let mut scrolling = Vec::new();
+                for frame in 0..24 {
+                    if frame > 0 && frame < 12 {
+                        text.insert(text.len() / 2, 'x');
+                    }
+                    let start = std::time::Instant::now();
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(900.0, 600.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                egui::ScrollArea::vertical()
+                                    .vertical_scroll_offset(if frame >= 12 {
+                                        (frame - 12) as f32 * 100.0
+                                    } else {
+                                        0.0
+                                    })
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut text)
+                                                .font(egui::TextStyle::Monospace)
+                                                .desired_width(880.0),
+                                        );
+                                    });
+                            });
+                        },
+                    );
+                    if frame >= 12 {
+                        scrolling.push(start.elapsed().as_secs_f64() * 1000.0);
+                    } else if frame > 0 {
+                        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
+                samples.sort_by(f64::total_cmp);
+                scrolling.sort_by(f64::total_cmp);
+                eprintln!(
+                    "{size} bytes long_line={long_line}: median {:.1} ms, max {:.1} ms",
+                    samples[5], samples[10]
+                );
+                eprintln!(
+                    "scroll median {:.1} ms, max {:.1} ms",
+                    scrolling[6], scrolling[11]
+                );
+            }
+        }
+    }
     use super::load_text;
     use std::io::Write;
 
