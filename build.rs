@@ -20,8 +20,32 @@ fn main() {
         let _ = fs::copy(&icns_path, profile_dir.join("ravnpad.icns"));
     }
 
-    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {
+    println!("cargo:rerun-if-changed=src/native");
+    let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if target == "macos" {
+        cc::Build::new()
+            .file("src/native/macos.m")
+            .flag("-fobjc-arc")
+            .flag("-Werror=implicit-function-declaration")
+            .compile("ravnpad_native");
+        println!("cargo:rustc-link-lib=framework=AppKit");
+    }
+    if target == "windows" {
+        cc::Build::new()
+            .file("src/native/windows.c")
+            .define("UNICODE", None)
+            .define("_UNICODE", None)
+            .compile("ravnpad_native");
+        for library in [
+            "user32", "gdi32", "comdlg32", "comctl32", "shell32", "ole32", "uxtheme",
+        ] {
+            println!("cargo:rustc-link-lib={library}");
+        }
+    }
+
+    if target == "windows" {
         let mut res = winresource::WindowsResource::new();
+        res.set_manifest(include_str!("src/native/windows.manifest"));
         res.set_icon(out.join("ravnpad.ico").to_str().expect("ico-path"));
         res.set("ProductName", "RavnPad");
         res.set("FileDescription", "RavnPad");

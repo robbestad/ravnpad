@@ -20,6 +20,8 @@ mod i18n;
 mod large;
 #[cfg(target_os = "macos")]
 mod macopen;
+#[cfg(any(target_os = "macos", windows))]
+mod native;
 mod native_dialog;
 mod prefs;
 mod recovery;
@@ -40,6 +42,19 @@ const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W
 const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 
 fn main() -> eframe::Result {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        native::run();
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        run_egui()
+    }
+}
+
+#[allow(dead_code)]
+fn run_egui() -> eframe::Result {
     #[cfg(windows)]
     associate::register();
     update::cleanup_old();
@@ -141,6 +156,8 @@ struct RavnPad {
     recovered_from: Option<PathBuf>,
     after_save: Option<Action>,
     ctx: egui::Context,
+    document_generation: u64,
+    close_requested: bool,
     text: String,
     saved_text: String,
     cache_valid: bool,
@@ -195,11 +212,25 @@ impl RavnPad {
         initial: Option<PathBuf>,
         prefs: prefs::Prefs,
     ) -> Self {
-        #[cfg(target_os = "macos")]
-        macopen::set_context(&cc.egui_ctx);
-        cc.egui_ctx.set_visuals(egui::Visuals::light());
-        let font_list = fonts::available_fonts();
-        fonts::apply(&cc.egui_ctx, &prefs.font, prefs.size, &font_list);
+        Self::new_core(cc.egui_ctx.clone(), initial, prefs, true)
+    }
+
+    fn new_core(
+        ctx: egui::Context,
+        initial: Option<PathBuf>,
+        prefs: prefs::Prefs,
+        legacy: bool,
+    ) -> Self {
+        let font_list = if legacy {
+            fonts::available_fonts()
+        } else {
+            Vec::new()
+        };
+        if legacy {
+            #[cfg(target_os = "macos")]
+            macopen::set_context(&ctx);
+            fonts::apply(&ctx, &prefs.font, prefs.size, &font_list);
+        }
         let (update_tx, update_rx) = mpsc::channel();
         let (spell_tx, spell_rx) = mpsc::channel();
         let (file_tx, file_rx) = mpsc::channel();
@@ -209,11 +240,13 @@ impl RavnPad {
             file_rx,
             file_busy: false,
             after_save: None,
-            recovery: recovery::Recovery::start(cc.egui_ctx.clone()),
+            recovery: recovery::Recovery::start(ctx.clone()),
             recovery_candidates: Vec::new(),
             recovery_due: None,
             recovered_from: None,
-            ctx: cc.egui_ctx.clone(),
+            ctx: ctx.clone(),
+            document_generation: 0,
+            close_requested: false,
             text: String::new(),
             saved_text: String::new(),
             cache_valid: false,
@@ -259,7 +292,7 @@ impl RavnPad {
             app.spawn_update_check(false);
         }
 
-        if app.prefs.spellcheck {
+        if legacy && app.prefs.spellcheck {
             app.start_spellcheck();
         }
 
@@ -268,6 +301,30 @@ impl RavnPad {
         }
 
         app
+    }
+
+    fn error_message(&self, error: AppError) -> String {
+        let t = self.t();
+        match error {
+            AppError::File(err) => t.file_error(&err),
+            AppError::Save(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                self.prefs.lang.io_text().conflict.to_owned()
+            }
+            AppError::Save(err) => t.save_error(&err),
+            AppError::Durability(err) => format!(
+                "{}\n{err}",
+                if matches!(self.prefs.lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk) {
+                    "Filen er lagret, men varig lagring kunne ikke bekreftes."
+                } else {
+                    "The file was saved, but durable storage could not be confirmed."
+                }
+            ),
+            AppError::Settings(err) => t.settings_error(&err),
+            AppError::Dictionary(err) => t.dictionary_error(&err),
+            AppError::DictUnavailable => t.dict_unavailable.to_owned(),
+            AppError::TooLargeToEdit => t.too_large_edit.to_owned(),
+            AppError::DropTooLarge => t.drop_too_large.to_owned(),
+        }
     }
 
     fn t(&self) -> &'static i18n::UiText {
@@ -506,6 +563,7 @@ impl RavnPad {
     fn execute(&mut self, action: Action) {
         match action {
             Action::New => {
+                self.document_generation += 1;
                 self.text.clear();
                 self.converted = false;
                 self.suggested_path = None;
@@ -554,6 +612,7 @@ impl RavnPad {
                 }
             }
             Action::OpenBytes(text) => {
+                self.document_generation += 1;
                 self.large = None;
                 self.text = text;
                 self.converted = false;
@@ -692,6 +751,7 @@ impl RavnPad {
                     };
                     if launched {
                         self.restarting = true;
+                        self.close_requested = true;
                         self.update = UpdateUi::Idle;
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     }
@@ -851,6 +911,9 @@ impl RavnPad {
     }
 
     fn apply_open(&mut self, path: PathBuf, result: Result<large::Opened, large::FileError>) {
+        if result.is_ok() {
+            self.document_generation += 1;
+        }
         match result {
             Ok(large::Opened::Edit(text)) => {
                 self.converted = false;
@@ -929,6 +992,7 @@ impl RavnPad {
             match event {
                 recovery::Event::Available(paths) => self.recovery_candidates = paths,
                 recovery::Event::Restored(path, text) => {
+                    self.document_generation += 1;
                     self.recovered_from = Some(path);
                     self.suggested_path = None;
                     self.file_busy = false;
@@ -983,6 +1047,7 @@ impl RavnPad {
                         }
                         if let Some(action) = self.after_save.take() {
                             if matches!(action, Action::Quit) {
+                                self.close_requested = true;
                                 self.ctx.send_viewport_cmd(ViewportCommand::Close);
                             } else {
                                 self.execute(action);
@@ -1487,26 +1552,7 @@ impl eframe::App for RavnPad {
         }
 
         if let Some(error) = self.error.take() {
-            let message = match error {
-                AppError::File(err) => t.file_error(&err),
-                AppError::Save(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                    self.prefs.lang.io_text().conflict.to_owned()
-                }
-                AppError::Save(err) => t.save_error(&err),
-                AppError::Durability(err) => format!(
-                    "{}\n{err}",
-                    if matches!(self.prefs.lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk) {
-                        "Filen er lagret, men varig lagring kunne ikke bekreftes."
-                    } else {
-                        "The file was saved, but durable storage could not be confirmed."
-                    }
-                ),
-                AppError::Settings(err) => t.settings_error(&err),
-                AppError::Dictionary(err) => t.dictionary_error(&err),
-                AppError::DictUnavailable => t.dict_unavailable.to_owned(),
-                AppError::TooLargeToEdit => t.too_large_edit.to_owned(),
-                AppError::DropTooLarge => t.drop_too_large.to_owned(),
-            };
+            let message = self.error_message(error);
             native_dialog::error(t.error_title, &message);
         }
 
@@ -1808,6 +1854,8 @@ mod tests {
             recovery_due: None,
             recovered_from: None,
             ctx: ctx.clone(),
+            document_generation: 0,
+            close_requested: false,
             text: String::new(),
             saved_text: String::new(),
             cache_valid: false,

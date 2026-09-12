@@ -32,8 +32,10 @@ impl Prefs {
                         "font" => prefs.font = value.trim().to_owned(),
                         "spell" => prefs.spellcheck = value.trim() == "1",
                         "size" => {
-                            if let Ok(size) = value.trim().parse::<f32>() {
-                                prefs.size = size.clamp(10.0, 36.0);
+                            if let Ok(size) = value.trim().parse::<f32>()
+                                && size.is_finite()
+                            {
+                                prefs.size = size.clamp(6.0, 144.0);
                             }
                         }
                         _ => {}

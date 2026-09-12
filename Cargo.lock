@@ -2600,6 +2600,7 @@ checksum = "ca45419789ae5a7899559e9512e58ca889e41f04f1f2445e9f4b290ceccd1d08"
 name = "ravnpad"
 version = "1.2.15"
 dependencies = [
+ "cc",
  "eframe",
  "icns",
  "ico",

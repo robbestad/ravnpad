@@ -48,8 +48,15 @@ jobs:
             exit 1
           fi
 
+      - name: Test shared controller
+        run: cargo test --locked
+
       - name: Build
         run: cargo build --release --locked
+
+      - name: Test native text control
+        shell: bash
+        run: ./target/release/ravnpad --native-smoke-test
 
       - name: Package Windows
         if: runner.os == 'Windows'
