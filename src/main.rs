@@ -107,6 +107,7 @@ enum Action {
 enum AppError {
     File(large::FileError),
     Save(std::io::Error),
+    Durability(std::io::Error),
     Settings(std::io::Error),
     Dictionary(String),
     DictUnavailable,
@@ -127,7 +128,7 @@ enum SpellEvent {
 
 enum FileEvent {
     Open(PathBuf, Result<large::Opened, large::FileError>),
-    Save(PathBuf, String, io::Result<()>),
+    Save(PathBuf, String, io::Result<storage::SaveOutcome>),
 }
 
 struct RavnPad {
@@ -149,6 +150,7 @@ struct RavnPad {
     cached_query: String,
     cached_matches: std::sync::Arc<Vec<FindMatch>>,
     path: Option<PathBuf>,
+    suggested_path: Option<PathBuf>,
     large: Option<large::LargeView>,
     prefs: prefs::Prefs,
     fonts: Vec<fonts::FontChoice>,
@@ -221,6 +223,7 @@ impl RavnPad {
             cached_query: String::new(),
             cached_matches: std::sync::Arc::new(Vec::new()),
             path: None,
+            suggested_path: None,
             large: None,
             prefs,
             fonts: font_list,
@@ -505,6 +508,7 @@ impl RavnPad {
             Action::New => {
                 self.text.clear();
                 self.converted = false;
+                self.suggested_path = None;
                 self.saved_text.clear();
                 self.dirty = false;
                 self.path = None;
@@ -553,6 +557,7 @@ impl RavnPad {
                 self.large = None;
                 self.text = text;
                 self.converted = false;
+                self.suggested_path = None;
                 self.saved_text.clone_from(&self.text);
                 self.path = None;
                 self.spell_dirty = true;
@@ -818,11 +823,14 @@ impl RavnPad {
     }
 
     fn dialog_dir(&self) -> Option<&std::path::Path> {
-        self.path.as_deref().and_then(std::path::Path::parent)
+        self.path
+            .as_deref()
+            .or(self.suggested_path.as_deref())
+            .and_then(std::path::Path::parent)
     }
 
     fn display_name_for_save(&self) -> String {
-        match &self.path {
+        match self.path.as_ref().or(self.suggested_path.as_ref()) {
             Some(path) => path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -846,6 +854,7 @@ impl RavnPad {
         match result {
             Ok(large::Opened::Edit(text)) => {
                 self.converted = false;
+                self.suggested_path = None;
                 self.large = None;
                 self.text = text;
                 self.saved_text.clone_from(&self.text);
@@ -853,6 +862,7 @@ impl RavnPad {
             }
             Ok(large::Opened::View(view)) => {
                 self.converted = false;
+                self.suggested_path = None;
                 self.text.clear();
                 self.saved_text.clear();
                 self.large = Some(view);
@@ -861,7 +871,7 @@ impl RavnPad {
             Ok(large::Opened::Converted { text, txt_path }) => {
                 self.large = None;
                 self.text = text;
-                let _ = txt_path;
+                self.suggested_path = Some(txt_path);
                 // Conversion must never write a sibling .txt file just by opening RTF.
                 self.path = None;
                 self.saved_text.clear();
@@ -920,6 +930,7 @@ impl RavnPad {
                 recovery::Event::Available(paths) => self.recovery_candidates = paths,
                 recovery::Event::Restored(path, text) => {
                     self.recovered_from = Some(path);
+                    self.suggested_path = None;
                     self.file_busy = false;
                     self.text = text;
                     self.saved_text.clear();
@@ -958,12 +969,18 @@ impl RavnPad {
             match event {
                 FileEvent::Open(path, result) => self.apply_open(path, result),
                 FileEvent::Save(path, text, result) => match result {
-                    Ok(()) => {
+                    Ok(outcome) => {
                         self.path = Some(path);
                         self.converted = false;
+                        self.suggested_path = None;
                         self.saved_text = text;
                         self.cache_valid = false;
                         self.refresh_document();
+                        if let Some(warning) = outcome.durability_warning {
+                            self.after_save = None;
+                            self.error = Some(AppError::Durability(warning));
+                            continue;
+                        }
                         if let Some(action) = self.after_save.take() {
                             if matches!(action, Action::Quit) {
                                 self.ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1476,6 +1493,14 @@ impl eframe::App for RavnPad {
                     self.prefs.lang.io_text().conflict.to_owned()
                 }
                 AppError::Save(err) => t.save_error(&err),
+                AppError::Durability(err) => format!(
+                    "{}\n{err}",
+                    if matches!(self.prefs.lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk) {
+                        "Filen er lagret, men varig lagring kunne ikke bekreftes."
+                    } else {
+                        "The file was saved, but durable storage could not be confirmed."
+                    }
+                ),
                 AppError::Settings(err) => t.settings_error(&err),
                 AppError::Dictionary(err) => t.dictionary_error(&err),
                 AppError::DictUnavailable => t.dict_unavailable.to_owned(),
@@ -1710,7 +1735,7 @@ fn load_text(path: &std::path::Path) -> Result<String, String> {
     }
 }
 
-fn save_text(path: &Path, text: &str) -> Result<(), io::Error> {
+fn save_text(path: &Path, text: &str) -> Result<storage::SaveOutcome, io::Error> {
     storage::save(path, text.as_bytes())
 }
 
@@ -1792,6 +1817,7 @@ mod tests {
             cached_query: String::new(),
             cached_matches: std::sync::Arc::new(Vec::new()),
             path: None,
+            suggested_path: None,
             large: None,
             prefs,
             fonts: Vec::new(),
@@ -1842,6 +1868,34 @@ mod tests {
         app.spell_tx.send((2, SpellEvent::Loaded(dict))).unwrap();
         app.poll_spell(&app.ctx.clone());
         assert!(matches!(app.spell, SpellState::Ready(_)));
+    }
+
+    #[test]
+    fn committed_warning_updates_baseline_without_running_followup() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir.path().join("recovery"));
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "new").unwrap();
+        app.saved_text = "old".into();
+        app.text = "new".into();
+        app.after_save = Some(Action::New);
+        app.file_tx
+            .send(FileEvent::Save(
+                path.clone(),
+                "new".into(),
+                Ok(storage::SaveOutcome {
+                    durability_warning: Some(io::Error::other("fsync failed")),
+                }),
+            ))
+            .unwrap();
+        app.poll_files();
+        assert_eq!(app.path.as_ref(), Some(&path));
+        assert_eq!(app.saved_text, "new");
+        assert_eq!(app.text, "new");
+        assert!(!app.is_dirty());
+        assert!(app.after_save.is_none());
+        assert!(matches!(app.error, Some(AppError::Durability(_))));
     }
 
     #[test]
@@ -1921,7 +1975,11 @@ mod tests {
         app.refresh_document();
         assert!(app.is_dirty());
         assert!(app.path.is_none());
+        assert_eq!(app.dialog_dir(), Some(dir.path()));
+        assert_eq!(app.display_name_for_save(), "note.txt");
         assert_eq!(std::fs::read_to_string(txt).unwrap(), "existing");
+        app.execute(Action::New);
+        assert!(app.suggested_path.is_none());
     }
 
     #[test]
