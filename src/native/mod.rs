@@ -61,7 +61,16 @@ fn enqueue(event: Event) {
 
 pub fn run() {
     if std::env::args().any(|arg| arg == "--native-smoke-test") {
-        std::process::exit(unsafe { rp_smoke_test() });
+        let native_result = unsafe { rp_smoke_test() };
+        // No menu command is requested by the smoke scenario. Inspect the real
+        // bridge queue: text-control notifications must not become app actions.
+        let unexpected_actions = EVENTS.with(|events| {
+            events.borrow().iter().filter(|event| matches!(event, Event::Action(_))).count()
+        });
+        if unexpected_actions != 0 {
+            eprintln!("Native notification routing: FAIL ({unexpected_actions} unexpected commands)");
+        }
+        std::process::exit(if unexpected_actions == 0 { native_result } else { 1 });
     }
     #[cfg(windows)]
     associate::register();
