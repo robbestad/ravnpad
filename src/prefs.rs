@@ -63,7 +63,7 @@ impl Prefs {
             self.size,
             u8::from(self.spellcheck)
         );
-        std::fs::write(path, body)
+        crate::storage::save(&path, body.as_bytes())
     }
 }
 

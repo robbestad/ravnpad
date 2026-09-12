@@ -2608,6 +2608,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "spellbook",
+ "tempfile",
  "ureq",
  "winit",
  "winreg",
