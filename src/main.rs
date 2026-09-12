@@ -47,7 +47,6 @@ fn main() -> eframe::Result {
     macopen::install();
 
     let prefs = prefs::Prefs::load();
-    let lang = prefs.lang;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("ravnpad")
@@ -56,7 +55,9 @@ fn main() -> eframe::Result {
             .with_min_inner_size([400.0, 280.0])
             .with_drag_and_drop(true)
             .with_fullscreen(false)
-            .with_title(format!("{} - {APP_NAME}", lang.text().untitled)),
+            // eframe also uses this initial title for the macOS app menu.
+            // Document titles are set separately by RavnPad::update.
+            .with_title(APP_NAME),
         persist_window: false,
         renderer: eframe::Renderer::Glow,
         vsync: true,
@@ -148,6 +149,7 @@ struct RavnPad {
     spell: SpellState,
     spell_misses: Vec<spell::Miss>,
     spell_dirty: bool,
+    spell_visible: std::ops::Range<usize>,
     spell_menu: Option<FindMatch>,
     spell_tx: Sender<SpellEvent>,
     spell_rx: Receiver<SpellEvent>,
@@ -201,6 +203,7 @@ impl RavnPad {
             spell: SpellState::Off,
             spell_misses: Vec::new(),
             spell_dirty: false,
+            spell_visible: 0..0,
             spell_menu: None,
             spell_tx,
             spell_rx,
@@ -1084,8 +1087,14 @@ impl eframe::App for RavnPad {
                         drag_scroll(ui, &output.response);
                         paint_matches(ui, &output, &matches, self.find_index);
                         if let SpellState::Ready(dict) = &self.spell {
-                            if output.response.changed() || self.spell_dirty {
-                                self.spell_misses = spell::misspellings(&self.text, dict);
+                            let visible = visible_chars(ui, &output);
+                            if output.response.changed()
+                                || self.spell_dirty
+                                || visible != self.spell_visible
+                            {
+                                self.spell_misses =
+                                    spell::misspellings(&self.text, dict, visible.clone());
+                                self.spell_visible = visible;
                                 self.spell_dirty = false;
                             }
                             paint_misses(ui, &output, &self.spell_misses);
@@ -1284,6 +1293,18 @@ fn find_matches(text: &str, query: &str) -> Vec<FindMatch> {
     matches
 }
 
+// Include complete rows at both edges, including partially clipped rows.
+fn visible_chars(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput) -> std::ops::Range<usize> {
+    let clip = output.text_clip_rect.intersect(ui.clip_rect());
+    let top = output.galley
+        .cursor_from_pos(egui::vec2(-f32::MAX, clip.min.y - output.galley_pos.y))
+        .index;
+    let bottom = output.galley
+        .cursor_from_pos(egui::vec2(f32::MAX, clip.max.y - output.galley_pos.y))
+        .index;
+    top..bottom.saturating_add(1)
+}
+
 // The editor's own selection is only painted while it has focus, so while
 // the find field is focused we draw match boxes ourselves via the galley.
 fn paint_matches(
@@ -1298,7 +1319,11 @@ fn paint_matches(
     let clip = output.text_clip_rect.intersect(ui.clip_rect());
     let painter = ui.painter().with_clip_rect(clip);
     let shift = output.galley_pos.to_vec2();
-    for (i, &m) in matches.iter().enumerate() {
+    let visible = visible_chars(ui, output);
+    let start = matches.partition_point(|m| m.cchar + m.len < visible.start);
+    for (i, &m) in matches.iter().enumerate().skip(start)
+        .take_while(|(_, m)| m.cchar < visible.end)
+    {
         let fill = if i == current {
             Color32::from_rgba_unmultiplied(255, 138, 0, 130)
         } else {

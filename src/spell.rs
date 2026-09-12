@@ -172,15 +172,24 @@ pub fn word_spans(text: &str) -> Vec<(usize, usize, &str)> {
     spans
 }
 
-// Returns one Miss per misspelled word.
-pub fn misspellings(text: &str, dict: &spellbook::Dictionary) -> Vec<Miss> {
+// Only consult the dictionary for words overlapping the viewport. Keep full
+// words and document-relative offsets so edge words can still be replaced.
+pub fn misspellings(
+    text: &str,
+    dict: &spellbook::Dictionary,
+    visible: std::ops::Range<usize>,
+) -> Vec<Miss> {
+    let mut checked = std::collections::HashMap::new();
     word_spans(text)
         .into_iter()
-        .filter(|(_, _, word)| !is_correct(word, dict))
-        .map(|(cchar, byte, word)| Miss {
-            cchar,
-            byte,
-            len: word.chars().count(),
+        .take_while(|(cchar, _, _)| *cchar < visible.end)
+        .filter_map(|(cchar, byte, word)| {
+            let len = word.chars().count();
+            if cchar + len <= visible.start {
+                return None;
+            }
+            let correct = *checked.entry(word).or_insert_with(|| is_correct(word, dict));
+            (!correct).then_some(Miss { cchar, byte, len })
         })
         .collect()
 }
@@ -246,6 +255,32 @@ fn skip_word(word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewport_checks_keep_unicode_offsets_and_whole_edge_words() {
+        let dict = spellbook::Dictionary::new("SET UTF-8\n", "1\nhello\n").unwrap();
+        let text = "hello æøå-feil hello feil";
+        let misses = misspellings(text, &dict, 8..10);
+        assert_eq!(misses.len(), 1);
+        assert_eq!(misses[0].cchar, 6);
+        assert_eq!(misses[0].byte, 6);
+        assert_eq!(misses[0].len, 8);
+        assert!(misspellings(text, &dict, 15..20).is_empty());
+    }
+
+    #[test]
+    fn large_document_only_checks_visible_words() {
+        let dict = spellbook::Dictionary::new("SET UTF-8\n", "1\nhello\n").unwrap();
+        let prefix = "æøå unknown\n".repeat(20_000);
+        assert!(prefix.len() > 200 * 1024);
+        let offset = prefix.chars().count();
+        let text = format!("{prefix}hello typo tail");
+        let misses = misspellings(&text, &dict, offset..offset + 10);
+        assert_eq!(misses.len(), 1);
+        assert_eq!(misses[0].cchar, offset + 6);
+        assert_eq!(misses[0].byte, prefix.len() + 6);
+        assert_eq!(misses[0].len, 4);
+    }
 
     #[test]
     fn word_spans_splits_on_punctuation() {
