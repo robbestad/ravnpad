@@ -156,6 +156,43 @@ mod tests {
         assert!(save(&path, b"replacement").is_err());
         assert_eq!(fs::read_to_string(path.join("original")).unwrap(), "safe");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_move_fallback_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("note");
+        fs::write(&target, "old").unwrap();
+        let mut tmp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        tmp.write_all(b"new").unwrap();
+        tmp.as_file().sync_all().unwrap();
+        let tmp = tmp.into_temp_path();
+
+        move_replace(&tmp, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(!tmp.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires RAVNPAD_WSL_TEST_DIR pointing to a running WSL distribution"]
+    fn saves_through_wsl_file_system_provider() {
+        let root = std::env::var_os("RAVNPAD_WSL_TEST_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("RAVNPAD_WSL_TEST_DIR is not set");
+        let dir = tempfile::Builder::new()
+            .prefix("ravnpad-wsl-test-")
+            .tempdir_in(root)
+            .unwrap();
+        let path = dir.path().join("note.txt");
+
+        save(&path, b"first").unwrap();
+        save_checked(&path, b"second", Some(b"first")).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 }
 
 // Compare actual contents, not just timestamps (which can be coarse on network drives).
@@ -281,6 +318,7 @@ fn replace(tmp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn replace(tmp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    const ERROR_NOT_SUPPORTED: i32 = 50;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn ReplaceFileW(
@@ -310,6 +348,38 @@ fn replace(tmp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
             0,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_NOT_SUPPORTED) {
+            // Some file-system providers, including WSL's \\wsl.localhost
+            // shares, do not implement ReplaceFileW. The temp file is in the
+            // same directory, so MoveFileExW can still replace it without a
+            // cross-volume copy.
+            return move_replace(&tmp, target);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn move_replace(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<_> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
     };
     if result == 0 {
