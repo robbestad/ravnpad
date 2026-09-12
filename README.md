@@ -20,10 +20,10 @@ It starts instantly, stays out of the way, and does not try to become an IDE.
 
 ## Why people keep it
 
-- **Native Open and Save** — Windows Explorer and macOS Finder, including network shares.
+- **Native editing** — AppKit/NSTextView on macOS and Win32/Rich Edit on Windows, with system menus, selection, undo, scrolling, font selection, and Open/Save dialogs.
 - **Fifteen languages** — Bokmål, Nynorsk, English, Swedish, Danish, Icelandic, German, Dutch, French, Spanish, Italian, Portuguese, Finnish, Polish, and Czech. Follows the system language when it can.
 - **Your font** — pick a system typeface and size. Settings are remembered.
-- **RTF in, text out** — open `.rtf`, get UTF-8, and a `.txt` saved beside the original.
+- **RTF in, text out** — open `.rtf` as an unsaved UTF-8 document, with a sibling `.txt` suggested when saving.
 - **Huge files** — over 2 MB opens as a read-only windowed view. Scroll a 2 GB log without freezing.
 - **Updates itself** — on Windows and macOS, **Help → Check for updates** (release builds also check at startup).
 - **Open with** — on Windows, register for `.txt` and friends without admin rights. RavnPad does not steal Word as the default handler.
@@ -76,11 +76,15 @@ That does not notarize RavnPad. Do not turn Gatekeeper off.
 
 Unsaved changes ask before New, Open, Quit, and drop. Only UTF-8 is supported.
 
-**Settings** (in-app): language, font, and size. File dialogs and alerts use the operating system.
+**macOS:** use ⌘ instead of Ctrl. Settings are in the application menu (⌘,); Find is ⌘F. The native font panel and spelling services are available. The app follows the system appearance.
+
+**Windows:** Settings contains language, font and spelling options. Ctrl+F opens the native Find dialog; Ctrl+H opens Replace. Native text services provide input-method and proofing support where installed.
+
+Files over 2 MiB remain read-only; the file-position slider loads a bounded window in the background. Linux retains the egui interface.
 
 ## Build
 
-Rust **1.88+**. On Linux you also want `libxcb`, `libxkbcommon`, and GTK 3 (native dialogs).
+Rust **1.88+**, plus Xcode Command Line Tools on macOS or the MSVC C compiler/Windows SDK on Windows. On Linux you also want `libxcb`, `libxkbcommon`, and GTK 3 (native dialogs).
 
 ```bash
 cargo run --release
@@ -97,3 +101,16 @@ The exe is `target\release\ravnpad.exe`. Release builds hide the console.
 ## License and mark
 
 MIT. The Ravn logo is a registered trademark.
+
+## Native control smoke tests
+
+```sh
+cargo test --locked
+cargo build --release --locked
+./target/release/ravnpad --native-smoke-test
+```
+
+The smoke test instantiates the actual platform text control and verifies Unicode
+round trips, undo/redo, document replacement and read-only loading. It does not
+open a user document or load preferences. CI runs it on Windows and both Mac
+architectures before producing packages.

@@ -67,6 +67,17 @@ impl LargeView {
         })
     }
 
+    #[cfg(any(target_os = "macos", windows))]
+    pub fn native_window(&mut self, fraction: Option<f64>) -> Result<String, FileError> {
+        if let Some(fraction) = fraction {
+            self.offset = (fraction.clamp(0.0, 1.0) * self.size as f64) as u64;
+            self.prepared_for = None;
+            if fraction >= 1.0 { self.scroll_to_end(80, 120)?; }
+        }
+        self.ensure_window(80, 120)?;
+        Ok(self.window.clone())
+    }
+
     pub fn status(&self, view_readonly: &str, decimal: char) -> String {
         let percent = if self.size == 0 {
             0
