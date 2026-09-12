@@ -6,7 +6,6 @@
 #include <richedit.h>
 #include <shellapi.h>
 #include <ole2.h>
-#include <aclapi.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -263,36 +262,3 @@ int rp_smoke_test(void) { smokeTest=1; smokeResult=1; rp_run(); return smokeResu
 void rp_lock(void) { busy=1; SendMessageW(editor,EM_SETREADONLY,TRUE,0); }
 
 void rp_cancel_close(void) {}
-
-// Copy owner, primary group and DACL through handles; never enable privileges
-// or continue with inherited/broader permissions if preserving them fails.
-DWORD rp_copy_security(const wchar_t *source,const wchar_t *target) {
-    DWORD sharing=FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE;
-    HANDLE input=CreateFileW(source,READ_CONTROL,sharing,NULL,OPEN_EXISTING,0,NULL);
-    if(input==INVALID_HANDLE_VALUE)return GetLastError();
-    HANDLE output=CreateFileW(target,READ_CONTROL|WRITE_DAC,sharing,NULL,OPEN_EXISTING,0,NULL);
-    if(output==INVALID_HANDLE_VALUE) { DWORD error=GetLastError(); CloseHandle(input); return error; }
-    PSID owner=NULL,group=NULL; PACL dacl=NULL; PSECURITY_DESCRIPTOR descriptor=NULL;
-    SECURITY_INFORMATION info=OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION;
-    DWORD error=GetSecurityInfo(input,SE_FILE_OBJECT,info,&owner,&group,&dacl,NULL,&descriptor);
-    if(error==ERROR_SUCCESS) {
-        SECURITY_DESCRIPTOR_CONTROL control=0; DWORD revision=0;
-        if(!GetSecurityDescriptorControl(descriptor,&control,&revision))error=GetLastError();
-        else {
-            PSID targetOwner=NULL,targetGroup=NULL; PSECURITY_DESCRIPTOR targetDescriptor=NULL;
-            error=GetSecurityInfo(output,SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION,
-                                  &targetOwner,&targetGroup,NULL,NULL,&targetDescriptor);
-            // Setting even an unchanged owner/group can require privileges that
-            // ordinary editors do not have. Verify identity before copying ACLs.
-            if(error==ERROR_SUCCESS && (!EqualSid(owner,targetOwner)||!EqualSid(group,targetGroup)))
-                error=ERROR_ACCESS_DENIED;
-            if(targetDescriptor)LocalFree(targetDescriptor);
-            if(error==ERROR_SUCCESS) {
-                info=DACL_SECURITY_INFORMATION|((control&SE_DACL_PROTECTED)?PROTECTED_DACL_SECURITY_INFORMATION:UNPROTECTED_DACL_SECURITY_INFORMATION);
-                error=SetSecurityInfo(output,SE_FILE_OBJECT,info,NULL,NULL,dacl,NULL);
-            }
-        }
-    }
-    if(descriptor)LocalFree(descriptor);
-    CloseHandle(output); CloseHandle(input); return error;
-}
