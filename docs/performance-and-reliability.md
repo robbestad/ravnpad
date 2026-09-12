@@ -80,7 +80,7 @@ extended attribute and ownership on macOS, in addition to the symlink test.
 
 On other Unix platforms, GNU `cp --attributes-only --preserve=mode,ownership,xattr`
 is required. Explicit preservation failures stop the save before replacement;
-there is no fallback that drops metadata. On Windows, PowerShell copies the
+there is no fallback that drops metadata. On Windows, the Win32 security APIs copy the
 original owner/group/DACL and `ReplaceFileW` preserves streams and other native
 metadata with ACL/merge-error ignoring disabled. These Linux/Windows paths still
 need native platform validation.

@@ -119,13 +119,18 @@ fn remove(path: &std::path::Path) -> io::Result<()> {
     }
 }
 
-impl Drop for Recovery {
-    fn drop(&mut self) {
-        // Drain earlier snapshot/deletion jobs before a clean process exit.
+impl Recovery {
+    pub fn finish(&mut self) {
+        // Cocoa termination may exit before Rust destructors run.
         let _ = self.tx.send(Command::Stop);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+impl Drop for Recovery {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 

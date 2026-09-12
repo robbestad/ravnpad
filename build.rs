@@ -37,7 +37,7 @@ fn main() {
             .define("_UNICODE", None)
             .compile("ravnpad_native");
         for library in [
-            "user32", "gdi32", "comdlg32", "comctl32", "shell32", "ole32", "uxtheme",
+            "user32", "gdi32", "comdlg32", "comctl32", "shell32", "ole32", "uxtheme", "advapi32",
         ] {
             println!("cargo:rustc-link-lib={library}");
         }
