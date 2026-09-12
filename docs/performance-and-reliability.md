@@ -80,10 +80,11 @@ extended attribute and ownership on macOS, in addition to the symlink test.
 
 On other Unix platforms, GNU `cp --attributes-only --preserve=mode,ownership,xattr`
 is required. Explicit preservation failures stop the save before replacement;
-there is no fallback that drops metadata. On Windows, PowerShell copies the
-original owner/group/DACL and `ReplaceFileW` preserves streams and other native
-metadata with ACL/merge-error ignoring disabled. These Linux/Windows paths still
-need native platform validation.
+there is no fallback that drops metadata. On Windows, `ReplaceFileW` preserves
+ACLs, streams and other native metadata with merge-error ignoring disabled. Some
+file-system providers, including Ubuntu WSL paths exposed through
+`\\wsl.localhost`, return `ERROR_NOT_SUPPORTED`; only in that case RavnPad falls
+back to a same-directory `MoveFileExW` replacement with `MOVEFILE_WRITE_THROUGH`.
 
 Platform references: macOS SDK `copyfile.h` definitions and
 [Microsoft ReplaceFileW documentation](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew).
