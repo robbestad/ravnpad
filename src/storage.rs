@@ -263,21 +263,12 @@ fn preserve_metadata(source: &Path, tmp: &tempfile::NamedTempFile) -> io::Result
 }
 
 #[cfg(windows)]
-fn preserve_metadata(source: &Path, tmp: &tempfile::NamedTempFile) -> io::Result<()> {
-    // Preserve owner/group/DACL explicitly; ReplaceFileW below retains streams,
-    // encryption, compression and security resource attributes. Fail closed if
-    // the caller cannot apply the original security descriptor.
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $acl=Get-Acl -LiteralPath $env:RAVNPAD_METADATA_SOURCE; Set-Acl -LiteralPath $env:RAVNPAD_METADATA_TARGET -AclObject $acl"])
-        .env("RAVNPAD_METADATA_SOURCE", source)
-        .env("RAVNPAD_METADATA_TARGET", tmp.path())
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
-    }
+fn preserve_metadata(_source: &Path, _tmp: &tempfile::NamedTempFile) -> io::Result<()> {
+    // ReplaceFileW merges the original file's attributes and ACLs into the
+    // replacement. Doing this first through PowerShell is redundant and can
+    // fail when the Security module is unavailable or Get-Acl cannot handle a
+    // particular file-system provider. Zero flags in replace() keep metadata
+    // merge errors fatal instead of silently dropping metadata.
     Ok(())
 }
 
@@ -301,17 +292,15 @@ fn replace(tmp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
             reserved: *mut std::ffi::c_void,
         ) -> i32;
     }
+    // ReplaceFileW opens the replacement without a sharing mode, so the
+    // NamedTempFile handle must be closed before calling it.
+    let tmp = tmp.into_temp_path();
     if !target.try_exists()? {
         tmp.persist_noclobber(target).map_err(|e| e.error)?;
         return Ok(());
     }
     let old: Vec<_> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-    let new: Vec<_> = tmp
-        .path()
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let new: Vec<_> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
     // Zero flags: never ignore ACL/metadata merge errors.
     let result = unsafe {
         ReplaceFileW(
