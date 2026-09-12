@@ -24,6 +24,8 @@ unsafe extern "C" {
     fn rp_preferences(font: *const c_char, points: f64, spell: i32, language: i32);
     fn rp_rebuild_menus();
     fn rp_close();
+    fn rp_lock();
+    fn rp_cancel_close();
 }
 
 enum Event {
@@ -256,10 +258,18 @@ impl Native {
         self.changed = false;
     }
     fn request(&mut self, action: Action) {
-        if self.app.file_busy || self.viewer_busy {
+        if self.app.file_busy
+            || self.viewer_busy
+            || matches!(self.app.update, UpdateUi::Downloading)
+        {
             return;
         }
         self.sync_text();
+        // Native modal loops may dispatch input for an ownerless dialog. Keep the
+        // document immutable while selecting paths or confirming unsaved changes.
+        unsafe {
+            rp_lock();
+        }
         if matches!(action, Action::Quit) && !self.app.is_dirty() {
             self.app.close_requested = true;
             return;
@@ -399,6 +409,9 @@ impl Native {
                 let candidates = self.app.recovery_candidates.clone();
                 for candidate in candidates {
                     let t = self.app.prefs.lang.io_text();
+                    unsafe {
+                        rp_lock();
+                    }
                     match native_dialog::unsaved(
                         t.recovery,
                         &candidate.preview,
@@ -496,7 +509,10 @@ impl Native {
                     .unwrap_or(0) as i32,
             );
             if self.app.close_requested {
+                self.app.recovery.finish();
                 rp_close();
+            } else if !self.app.file_busy {
+                rp_cancel_close();
             }
         }
     }

@@ -6,6 +6,7 @@
 #include <richedit.h>
 #include <shellapi.h>
 #include <ole2.h>
+#include <aclapi.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -21,7 +22,7 @@ static UINT findMessage;
 static FINDREPLACEW find;
 static wchar_t query[1024], replacement[1024], currentFont[LF_FACESIZE];
 static double currentSize;
-static int updating, busy, readonlyDocument, currentSpell, smokeTest, smokeResult;
+static int updating, busy, readonlyDocument, currentSpell, smokeTest, smokeResult, documentDirty;
 static UINT dpi=96;
 
 static wchar_t *wide(const char *s) {
@@ -165,7 +166,7 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
         case WM_TIMER: rp_tick(); return 0;
         case WM_HSCROLL: if((HWND)l==position&&LOWORD(w)==TB_ENDTRACK) rp_view(SendMessageW(position,TBM_GETPOS,0,0)/1000.0); return 0;
         case WM_COMMAND:
-            if((HWND)l==editor&&HIWORD(w)==EN_CHANGE) { if(!updating) rp_changed(); }
+            if((HWND)l==editor&&HIWORD(w)==EN_CHANGE) { if(!updating) { documentDirty=1; rp_changed(); } }
             else if(!busy) command(LOWORD(w)); return 0;
         case WM_DROPFILES: {
             HDROP drop=(HDROP)w; UINT count=DragQueryFileW(drop,0xffffffff,NULL,0);
@@ -173,7 +174,10 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
             DragFinish(drop); return 0;
         }
         case WM_CLOSE: rp_action(RP_QUIT); rp_tick(); return 0;
-        case WM_QUERYENDSESSION: rp_action(RP_QUIT); rp_tick(); return FALSE;
+        case WM_QUERYENDSESSION:
+            if(!documentDirty&&!busy)return TRUE;
+            rp_action(RP_QUIT); rp_tick(); return !IsWindow(hwnd);
+        case WM_ENDSESSION: if(w) { DestroyWindow(hwnd); } return 0;
         case WM_DESTROY: KillTimer(hwnd,1); PostQuitMessage(0); return 0;
         default: return DefWindowProcW(hwnd,message,w,l);
     }
@@ -235,7 +239,7 @@ char *rp_copy_text(size_t *length) {
 }
 void rp_free_text(char *text) { free(text); }
 void rp_state(const char *title,const char *path,const char *value,int dirty,int working,int readonly) {
-    (void)path; (void)dirty; text(window,title); text(status,value); busy=working; readonlyDocument=readonly;
+    (void)path; documentDirty=dirty; text(window,title); text(status,value); busy=working; readonlyDocument=readonly;
     SendMessageW(editor,EM_SETREADONLY,working||readonly,0); EnableWindow(position,!working); ShowWindow(position,readonly?SW_SHOW:SW_HIDE);
     EnableMenuItem(menu,RP_SAVE,MF_BYCOMMAND|((working||readonly)?MF_GRAYED:MF_ENABLED));
     EnableMenuItem(menu,RP_SAVE_AS,MF_BYCOMMAND|((working||readonly)?MF_GRAYED:MF_ENABLED));
@@ -255,3 +259,30 @@ void rp_preferences(const char *name,double points,int spell,int language) {
 void rp_close(void) { DestroyWindow(window); }
 
 int rp_smoke_test(void) { smokeTest=1; smokeResult=1; rp_run(); return smokeResult; }
+
+void rp_lock(void) { busy=1; SendMessageW(editor,EM_SETREADONLY,TRUE,0); }
+
+void rp_cancel_close(void) {}
+
+// Copy owner, primary group and DACL through handles; never enable privileges
+// or continue with inherited/broader permissions if preserving them fails.
+DWORD rp_copy_security(const wchar_t *source,const wchar_t *target) {
+    DWORD sharing=FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE;
+    HANDLE input=CreateFileW(source,READ_CONTROL,sharing,NULL,OPEN_EXISTING,0,NULL);
+    if(input==INVALID_HANDLE_VALUE)return GetLastError();
+    HANDLE output=CreateFileW(target,WRITE_DAC|WRITE_OWNER,sharing,NULL,OPEN_EXISTING,0,NULL);
+    if(output==INVALID_HANDLE_VALUE) { DWORD error=GetLastError(); CloseHandle(input); return error; }
+    PSID owner=NULL,group=NULL; PACL dacl=NULL; PSECURITY_DESCRIPTOR descriptor=NULL;
+    SECURITY_INFORMATION info=OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION;
+    DWORD error=GetSecurityInfo(input,SE_FILE_OBJECT,info,&owner,&group,&dacl,NULL,&descriptor);
+    if(error==ERROR_SUCCESS) {
+        SECURITY_DESCRIPTOR_CONTROL control=0; DWORD revision=0;
+        if(!GetSecurityDescriptorControl(descriptor,&control,&revision))error=GetLastError();
+        else {
+            info|=(control&SE_DACL_PROTECTED)?PROTECTED_DACL_SECURITY_INFORMATION:UNPROTECTED_DACL_SECURITY_INFORMATION;
+            error=SetSecurityInfo(output,SE_FILE_OBJECT,info,owner,group,dacl,NULL);
+        }
+    }
+    if(descriptor)LocalFree(descriptor);
+    CloseHandle(output); CloseHandle(input); return error;
+}

@@ -264,19 +264,21 @@ fn preserve_metadata(source: &Path, tmp: &tempfile::NamedTempFile) -> io::Result
 
 #[cfg(windows)]
 fn preserve_metadata(source: &Path, tmp: &tempfile::NamedTempFile) -> io::Result<()> {
-    // Preserve owner/group/DACL explicitly; ReplaceFileW below retains streams,
-    // encryption, compression and security resource attributes. Fail closed if
-    // the caller cannot apply the original security descriptor.
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $acl=Get-Acl -LiteralPath $env:RAVNPAD_METADATA_SOURCE; Set-Acl -LiteralPath $env:RAVNPAD_METADATA_TARGET -AclObject $acl"])
-        .env("RAVNPAD_METADATA_SOURCE", source)
-        .env("RAVNPAD_METADATA_TARGET", tmp.path())
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
+    use std::os::windows::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn rp_copy_security(source: *const u16, target: *const u16) -> u32;
+    }
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = tmp
+        .path()
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // Native ACL APIs do not depend on PowerShell profiles, modules or policy.
+    let error = unsafe { rp_copy_security(source.as_ptr(), target.as_ptr()) };
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error as i32));
     }
     Ok(())
 }

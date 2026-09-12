@@ -8,7 +8,7 @@ static NSScrollView *scroll;
 static NSTextView *editor;
 static NSTextField *statusLabel;
 static NSSlider *filePosition;
-static BOOL updating, busy, readonlyDocument, smokeTest;
+static BOOL updating, busy, readonlyDocument, smokeTest, terminationPending;
 static NSString *currentFont;
 static double currentSize;
 static BOOL currentSpell;
@@ -144,7 +144,12 @@ void rp_rebuild_menus(void) {
 - (void)openRecent:(NSMenuItem *)sender { rp_open([(NSURL *)sender.representedObject path].UTF8String); rp_tick(); }
 - (void)moveFile:(NSSlider *)sender { rp_view(sender.doubleValue); }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; rp_action(RP_QUIT); return NO; }
-- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender { (void)sender; rp_action(RP_QUIT); return NSTerminateCancel; }
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    (void)sender; if(busy) return NSTerminateCancel;
+    terminationPending=YES; rp_action(RP_QUIT);
+    dispatch_async(dispatch_get_main_queue(), ^{ rp_tick(); });
+    return NSTerminateLater;
+}
 - (void)application:(NSApplication *)sender openFiles:(NSArray<NSString *> *)files {
     for (NSString *path in files) rp_open(path.UTF8String);
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
@@ -203,6 +208,7 @@ void rp_preferences(const char *font,double points,int spell,int language) {
     }
 }
 void rp_close(void) {
+    if(terminationPending) { terminationPending=NO; [NSApp replyToApplicationShouldTerminate:YES]; return; }
     [window orderOut:nil]; [NSApp stop:nil];
     [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0] atStart:NO];
 }
@@ -229,3 +235,7 @@ int rp_smoke_test(void) {
         [window close]; return valid?0:1;
     }
 }
+
+void rp_lock(void) { busy=YES; editor.editable=NO; }
+
+void rp_cancel_close(void) { if(terminationPending) { terminationPending=NO; [NSApp replyToApplicationShouldTerminate:NO]; } }

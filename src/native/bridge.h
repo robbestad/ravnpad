@@ -24,4 +24,6 @@ void rp_state(const char *title, const char *path, const char *status, int dirty
 void rp_preferences(const char *font, double points, int spell, int language);
 void rp_rebuild_menus(void);
 void rp_close(void);
+void rp_lock(void);
+void rp_cancel_close(void);
 #endif
