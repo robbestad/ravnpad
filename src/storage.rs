@@ -307,9 +307,11 @@ fn replace(tmp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
         tmp.persist_noclobber(target).map_err(|e| e.error)?;
         return Ok(());
     }
+    // ReplaceFileW opens the replacement without FILE_SHARE_WRITE. Close our
+    // writer first; TempPath retains cleanup ownership if replacement fails.
+    let tmp = tmp.into_temp_path();
     let old: Vec<_> = target.as_os_str().encode_wide().chain(Some(0)).collect();
     let new: Vec<_> = tmp
-        .path()
         .as_os_str()
         .encode_wide()
         .chain(Some(0))
