@@ -450,7 +450,7 @@ impl Native {
                 native_dialog::error(self.app.t().error_title, &self.app.error_message(error));
             }
         }
-        self.app.poll_update(&self.app.ctx.clone());
+        self.app.poll_update_events(&self.app.ctx.clone());
         let t = self.app.t();
         match std::mem::replace(&mut self.app.update, UpdateUi::Idle) {
             UpdateUi::Available { version, url } => {

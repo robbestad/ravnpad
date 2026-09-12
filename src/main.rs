@@ -700,6 +700,13 @@ impl RavnPad {
     }
 
     fn poll_update(&mut self, ctx: &egui::Context) -> Option<Action> {
+        self.poll_update_events(ctx);
+        self.show_update_window(ctx)
+    }
+
+    // Shared state handling must also work without an active egui frame.
+    // Native frontends present their own dialogs after processing these events.
+    fn poll_update_events(&mut self, ctx: &egui::Context) {
         while let Ok((generation, event)) = self.update_rx.try_recv() {
             if generation != self.update_generation {
                 continue;
@@ -762,8 +769,6 @@ impl RavnPad {
         if !matches!(self.update, UpdateUi::Idle) {
             ctx.request_repaint();
         }
-
-        self.show_update_window(ctx)
     }
 
     fn show_update_window(&mut self, ctx: &egui::Context) -> Option<Action> {
@@ -1897,6 +1902,29 @@ mod tests {
             pending_opens: std::collections::VecDeque::new(),
         };
         app
+    }
+
+    #[test]
+    fn native_update_check_does_not_require_an_egui_frame() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path());
+        let ctx = app.ctx.clone();
+        app.update = UpdateUi::Checking { user: true };
+        app.poll_update_events(&ctx);
+        assert!(matches!(app.update, UpdateUi::Checking { user: true }));
+        app.update_tx.send((app.update_generation, UpdateEvent::UpToDate)).unwrap();
+        app.poll_update_events(&ctx);
+        assert!(matches!(app.update, UpdateUi::UpToDate));
+        app.update = UpdateUi::Checking { user: true };
+        app.update_tx.send((app.update_generation, UpdateEvent::Failed("offline".into()))).unwrap();
+        app.poll_update_events(&ctx);
+        assert!(matches!(&app.update, UpdateUi::Failed(message) if message == "offline"));
+        app.update_tx.send((app.update_generation, UpdateEvent::Available {
+            version: "9.0.0".into(), url: "https://example.invalid/update.zip".into(),
+        })).unwrap();
+        app.poll_update_events(&ctx);
+        assert!(matches!(&app.update, UpdateUi::Available { version, .. } if version == "9.0.0"));
     }
 
     #[test]
