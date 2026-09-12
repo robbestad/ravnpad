@@ -63,7 +63,7 @@ impl Prefs {
             self.size,
             u8::from(self.spellcheck)
         );
-        crate::storage::save(&path, body.as_bytes())
+        crate::storage::save(&path, body.as_bytes()).map(|_| ())
     }
 }
 

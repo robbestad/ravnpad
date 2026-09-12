@@ -3,8 +3,10 @@
 Implemented September 12, 2026:
 
 - Document and preference writes stage data in the destination directory, sync it,
-  and atomically replace the destination. Unix directory sync errors are reported.
-  Existing permissions and symbolic links are preserved. Atomic replacement can
+  and atomically replace the destination. A Unix directory sync error after
+  replacement is a committed-save durability warning: the editor updates its
+  saved baseline, reports the warning, and cancels an automatic follow-up action.
+  Existing symbolic links and security metadata are preserved. Atomic replacement can
   change inode identity; hard links are not preserved as shared writable aliases.
 - Editable file loading and saving run on worker threads. The UI shows progress
   and prevents editing or closing during an operation. Save-before-close/open/new
@@ -15,6 +17,7 @@ Implemented September 12, 2026:
   between the final check and replacement. Save As follows the native dialog's
   explicit replacement confirmation.
 - Opening RTF produces an unsaved document and never writes a sibling text file.
+  Its sibling `.txt` path is retained only as the suggested Save As location.
 - Counts, dirty state and search results are cached until document/query changes.
   Search results are shared between frames instead of copying match vectors.
   Spelling only allocates word spans and performs dictionary lookups around the
@@ -67,3 +70,25 @@ changes/deletion, save continuation ordering, dirty-state undo, RTF collisions,
 stale dictionary results, recovery persistence/restoration and ordered cleanup.
 Native dialogs, recovery window appearance and Windows filesystem behavior still
 need manual/platform validation.
+
+## Atomic replacement metadata
+
+On macOS, `fcopyfile(COPYFILE_METADATA)` copies POSIX metadata, ACLs and extended
+attributes before writing the temporary file. Ownership and mode are checked
+explicitly before replacement. The regression suite verifies ACLs, a custom
+extended attribute and ownership on macOS, in addition to the symlink test.
+
+On other Unix platforms, GNU `cp --attributes-only --preserve=mode,ownership,xattr`
+is required. Explicit preservation failures stop the save before replacement;
+there is no fallback that drops metadata. On Windows, PowerShell copies the
+original owner/group/DACL and `ReplaceFileW` preserves streams and other native
+metadata with ACL/merge-error ignoring disabled. These Linux/Windows paths still
+need native platform validation.
+
+Platform references: macOS SDK `copyfile.h` definitions and
+[Microsoft ReplaceFileW documentation](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew).
+
+Review regression checks: 50 tests passed on macOS, 2 ignored. The tests inject
+a post-replacement directory sync failure and verify the resulting save baseline,
+subsequent save, and cancellation of automatic follow-up actions. RTF tests verify
+both the absence of automatic writes and preservation of the suggested location.
