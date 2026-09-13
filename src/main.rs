@@ -33,6 +33,8 @@ mod update;
 const APP_NAME: &str = "RavnPad";
 
 const NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
+const NEW_WINDOW: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::N);
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const SAVE_AS: KeyboardShortcut =
@@ -97,6 +99,14 @@ fn initial_path() -> Option<PathBuf> {
     std::env::args_os().nth(1).map(PathBuf::from)
 }
 
+fn apply_theme(ctx: &egui::Context, theme: prefs::ThemePref) {
+    ctx.set_theme(match theme {
+        prefs::ThemePref::System => egui::ThemePreference::System,
+        prefs::ThemePref::Light => egui::ThemePreference::Light,
+        prefs::ThemePref::Dark => egui::ThemePreference::Dark,
+    });
+}
+
 fn load_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!(concat!(
         env!("OUT_DIR"),
@@ -108,6 +118,7 @@ fn load_icon() -> egui::IconData {
 #[derive(Clone)]
 enum Action {
     New,
+    NewWindow,
     Open,
     Save,
     SaveAs,
@@ -128,6 +139,7 @@ enum AppError {
     DictUnavailable,
     TooLargeToEdit,
     DropTooLarge,
+    LaunchWindow(std::io::Error),
 }
 
 enum SpellState {
@@ -170,6 +182,8 @@ struct RavnPad {
     suggested_path: Option<PathBuf>,
     large: Option<large::LargeView>,
     prefs: prefs::Prefs,
+    editor_scroll_y: f32,
+    restore_editor_scroll: bool,
     fonts: Vec<fonts::FontChoice>,
     settings_open: bool,
     last_title: String,
@@ -229,6 +243,7 @@ impl RavnPad {
         if legacy {
             #[cfg(target_os = "macos")]
             macopen::set_context(&ctx);
+            apply_theme(&ctx, prefs.theme);
             fonts::apply(&ctx, &prefs.font, prefs.size, &font_list);
         }
         let (update_tx, update_rx) = mpsc::channel();
@@ -259,6 +274,8 @@ impl RavnPad {
             suggested_path: None,
             large: None,
             prefs,
+            editor_scroll_y: 0.0,
+            restore_editor_scroll: false,
             fonts: font_list,
             settings_open: false,
             last_title: String::new(),
@@ -324,6 +341,7 @@ impl RavnPad {
             AppError::DictUnavailable => t.dict_unavailable.to_owned(),
             AppError::TooLargeToEdit => t.too_large_edit.to_owned(),
             AppError::DropTooLarge => t.drop_too_large.to_owned(),
+            AppError::LaunchWindow(err) => format!("{}:\n{err}", t.cannot_open_window),
         }
     }
 
@@ -350,8 +368,62 @@ impl RavnPad {
     }
 
     fn save_prefs(&mut self) {
-        if let Err(err) = self.prefs.save() {
-            self.error = Some(AppError::Settings(err));
+        #[cfg(not(test))]
+        {
+            // Another open window may have newer history or reading positions.
+            let latest = prefs::Prefs::load();
+            self.prefs.recent = latest.recent;
+            self.prefs.positions = latest.positions;
+            if let Err(err) = self.prefs.save() {
+                self.error = Some(AppError::Settings(err));
+            }
+        }
+    }
+
+    fn remember_position(&mut self) -> Option<(PathBuf, f32, u64)> {
+        let Some(path) = self.path.clone() else {
+            return None;
+        };
+        let offset = self.large.as_ref().map_or(0, large::LargeView::offset);
+        self.prefs.set_position(&path, self.editor_scroll_y, offset);
+        Some((path, self.editor_scroll_y, offset))
+    }
+
+    fn remember_position_and_save(&mut self) {
+        let Some(position) = self.remember_position() else {
+            return;
+        };
+        #[cfg(test)]
+        let _ = position;
+        #[cfg(not(test))]
+        {
+            // Update only the shared session state, preserving settings changed elsewhere.
+            let (path, scroll, offset) = position;
+            let mut latest = prefs::Prefs::load();
+            latest.set_position(&path, scroll, offset);
+            if let Err(err) = latest.save() {
+                self.error = Some(AppError::Settings(err));
+            } else {
+                self.prefs.recent = latest.recent;
+                self.prefs.positions = latest.positions;
+            }
+        }
+    }
+
+    fn record_recent(&mut self, path: &Path) {
+        #[cfg(test)]
+        self.prefs.add_recent(path);
+        #[cfg(not(test))]
+        {
+            // Start with the latest disk state so concurrent windows do not lose entries.
+            let mut latest = prefs::Prefs::load();
+            latest.add_recent(path);
+            if let Err(err) = latest.save() {
+                self.error = Some(AppError::Settings(err));
+            } else {
+                self.prefs.recent = latest.recent;
+                self.prefs.positions = latest.positions;
+            }
         }
     }
 
@@ -427,6 +499,27 @@ impl RavnPad {
             }
 
             ui.add_space(10.0);
+            ui.label(t.theme);
+            let mut theme = self.prefs.theme;
+            egui::ComboBox::from_id_salt("settings_theme")
+                .selected_text(match theme {
+                    prefs::ThemePref::System => t.theme_system,
+                    prefs::ThemePref::Light => t.theme_light,
+                    prefs::ThemePref::Dark => t.theme_dark,
+                })
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut theme, prefs::ThemePref::System, t.theme_system);
+                    ui.selectable_value(&mut theme, prefs::ThemePref::Light, t.theme_light);
+                    ui.selectable_value(&mut theme, prefs::ThemePref::Dark, t.theme_dark);
+                });
+            if theme != self.prefs.theme {
+                self.prefs.theme = theme;
+                apply_theme(ctx, theme);
+                self.save_prefs();
+            }
+
+            ui.add_space(10.0);
             ui.label(t.font_label);
             let mut font = self.prefs.font.clone();
             let current_name = self
@@ -481,6 +574,13 @@ impl RavnPad {
                 } else {
                     self.stop_spellcheck();
                 }
+            }
+
+            let mut line_wrap = self.prefs.line_wrap;
+            if ui.checkbox(&mut line_wrap, t.line_wrap).changed() {
+                self.prefs.line_wrap = line_wrap;
+                self.restore_editor_scroll = false;
+                self.save_prefs();
             }
 
             ui.add_space(12.0);
@@ -564,6 +664,7 @@ impl RavnPad {
         match action {
             Action::New => {
                 self.document_generation += 1;
+                self.remember_position_and_save();
                 self.text.clear();
                 self.converted = false;
                 self.suggested_path = None;
@@ -571,11 +672,20 @@ impl RavnPad {
                 self.dirty = false;
                 self.path = None;
                 self.large = None;
+                self.editor_scroll_y = 0.0;
+                self.restore_editor_scroll = true;
                 self.spell_dirty = true;
                 self.cache_valid = false;
             }
+            Action::NewWindow => match std::env::current_exe()
+                .and_then(|exe| std::process::Command::new(exe).spawn())
+            {
+                Ok(_) => {}
+                Err(err) => self.error = Some(AppError::LaunchWindow(err)),
+            },
             Action::Open => {
                 if let Some(path) = self.pick_open_path() {
+                    self.remember_position_and_save();
                     self.open_path(path);
                 }
             }
@@ -598,8 +708,12 @@ impl RavnPad {
             Action::Quit => {
                 // Close is sent from the caller that has Context.
             }
-            Action::OpenPath(path) => self.open_path(path),
+            Action::OpenPath(path) => {
+                self.remember_position_and_save();
+                self.open_path(path);
+            }
             Action::Recover(path) => {
+                self.remember_position_and_save();
                 self.file_busy = true;
                 if self
                     .recovery
@@ -613,12 +727,15 @@ impl RavnPad {
             }
             Action::OpenBytes(text) => {
                 self.document_generation += 1;
+                self.remember_position_and_save();
                 self.large = None;
                 self.text = text;
                 self.converted = false;
                 self.suggested_path = None;
                 self.saved_text.clone_from(&self.text);
                 self.path = None;
+                self.editor_scroll_y = 0.0;
+                self.restore_editor_scroll = true;
                 self.spell_dirty = true;
                 self.cache_valid = false;
             }
@@ -919,6 +1036,9 @@ impl RavnPad {
         if result.is_ok() {
             self.document_generation += 1;
         }
+        let recent_path = path.clone();
+        let (scroll_y, large_offset) = self.prefs.position(&path);
+        let opened = result.is_ok();
         match result {
             Ok(large::Opened::Edit(text)) => {
                 self.converted = false;
@@ -927,14 +1047,19 @@ impl RavnPad {
                 self.text = text;
                 self.saved_text.clone_from(&self.text);
                 self.path = Some(path);
+                self.editor_scroll_y = scroll_y;
+                self.restore_editor_scroll = true;
             }
-            Ok(large::Opened::View(view)) => {
+            Ok(large::Opened::View(mut view)) => {
+                view.set_offset(large_offset);
                 self.converted = false;
                 self.suggested_path = None;
                 self.text.clear();
                 self.saved_text.clear();
                 self.large = Some(view);
                 self.path = Some(path);
+                self.editor_scroll_y = 0.0;
+                self.restore_editor_scroll = false;
             }
             Ok(large::Opened::Converted { text, txt_path }) => {
                 self.large = None;
@@ -944,8 +1069,13 @@ impl RavnPad {
                 self.path = None;
                 self.saved_text.clear();
                 self.converted = true;
+                self.editor_scroll_y = 0.0;
+                self.restore_editor_scroll = true;
             }
             Err(err) => self.error = Some(AppError::File(err)),
+        }
+        if opened {
+            self.record_recent(&recent_path);
         }
         self.spell_dirty = true;
         self.cache_valid = false;
@@ -1039,7 +1169,8 @@ impl RavnPad {
                 FileEvent::Open(path, result) => self.apply_open(path, result),
                 FileEvent::Save(path, text, result) => match result {
                     Ok(outcome) => {
-                        self.path = Some(path);
+                        self.path = Some(path.clone());
+                        self.record_recent(&path);
                         self.converted = false;
                         self.suggested_path = None;
                         self.saved_text = text;
@@ -1086,6 +1217,8 @@ impl RavnPad {
                 Some(Action::Save)
             } else if input.consume_shortcut(&OPEN) {
                 Some(Action::Open)
+            } else if input.consume_shortcut(&NEW_WINDOW) {
+                Some(Action::NewWindow)
             } else if input.consume_shortcut(&NEW) {
                 Some(Action::New)
             } else if input.consume_shortcut(&QUIT) || input.consume_shortcut(&CLOSE) {
@@ -1195,6 +1328,7 @@ impl eframe::App for RavnPad {
         }
 
         let t = self.t();
+        let recent_files = self.prefs.recent.clone();
         if !self.recovery_candidates.is_empty() {
             let labels = self.prefs.lang.io_text();
             let mut restore = None;
@@ -1233,9 +1367,30 @@ impl eframe::App for RavnPad {
                     if menu_item(ui, t.new, "Ctrl+N") {
                         action = Some(Action::New);
                     }
+                    if menu_item(ui, t.new_window, "Ctrl+Shift+N") {
+                        action = Some(Action::NewWindow);
+                    }
                     if menu_item(ui, t.open, "Ctrl+O") {
                         action = Some(Action::Open);
                     }
+                    ui.add_enabled_ui(!recent_files.is_empty(), |ui| {
+                        ui.menu_button(t.recent_files, |ui| {
+                            for path in &recent_files {
+                                let label = path
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.display().to_string());
+                                if ui
+                                    .button(label)
+                                    .on_hover_text(path.display().to_string())
+                                    .clicked()
+                                {
+                                    action = Some(Action::OpenPath(path.clone()));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
                     ui.separator();
                     ui.add_enabled_ui(self.large.is_none(), |ui| {
                         if menu_item(ui, t.save, "Ctrl+S") {
@@ -1397,123 +1552,136 @@ impl eframe::App for RavnPad {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(view) = &mut self.large {
-                view.show(ui, dialog_busy, t.cannot_read);
+                view.show(ui, dialog_busy, t.cannot_read, self.prefs.line_wrap);
             } else {
                 let available = ui.available_size();
                 let row_height = ui.text_style_height(&TextStyle::Monospace);
                 let min_rows = ((available.y / row_height).floor() as usize).max(1);
 
-                egui::ScrollArea::vertical()
-                    .id_salt("editor_scroll")
-                    .auto_shrink([false, false])
-                    .scroll_source(if dialog_busy {
-                        ScrollSource::NONE
-                    } else {
-                        ScrollSource {
-                            scroll_bar: true,
-                            drag: false,
-                            mouse_wheel: true,
+                let line_wrap = self.prefs.line_wrap;
+                let mut scroll_area = if line_wrap {
+                    egui::ScrollArea::vertical()
+                } else {
+                    egui::ScrollArea::both()
+                }
+                .id_salt("editor_scroll")
+                .auto_shrink([false, false])
+                .scroll_source(if dialog_busy {
+                    ScrollSource::NONE
+                } else {
+                    ScrollSource {
+                        scroll_bar: true,
+                        drag: false,
+                        mouse_wheel: true,
+                    }
+                });
+                if std::mem::take(&mut self.restore_editor_scroll) {
+                    scroll_area = scroll_area.vertical_scroll_offset(self.editor_scroll_y);
+                }
+                let scroll_output = scroll_area.show(ui, |ui| {
+                    let output = egui::TextEdit::multiline(&mut self.text)
+                        .id(egui::Id::new("editor"))
+                        .font(TextStyle::Monospace)
+                        .desired_width(if line_wrap {
+                            ui.available_width()
+                        } else {
+                            f32::INFINITY
+                        })
+                        .desired_rows(min_rows)
+                        .lock_focus(!dialog_busy)
+                        .interactive(!dialog_busy)
+                        .show(ui);
+                    if output.response.changed() {
+                        self.cache_valid = false;
+                    }
+                    drag_scroll(ui, &output.response);
+                    paint_matches(ui, &output, &matches, self.find_index);
+                    if let SpellState::Ready(dict) = &self.spell {
+                        let visible = visible_chars(ui, &output);
+                        if output.response.changed()
+                            || self.spell_dirty
+                            || visible != self.spell_visible
+                        {
+                            self.spell_misses =
+                                spell::misspellings(&self.text, dict, visible.clone());
+                            self.spell_visible = visible;
+                            self.spell_dirty = false;
                         }
-                    })
-                    .show(ui, |ui| {
-                        let output = egui::TextEdit::multiline(&mut self.text)
-                            .id(egui::Id::new("editor"))
-                            .font(TextStyle::Monospace)
-                            .desired_width(ui.available_width())
-                            .desired_rows(min_rows)
-                            .lock_focus(!dialog_busy)
-                            .interactive(!dialog_busy)
-                            .show(ui);
-                        if output.response.changed() {
-                            self.cache_valid = false;
-                        }
-                        drag_scroll(ui, &output.response);
-                        paint_matches(ui, &output, &matches, self.find_index);
-                        if let SpellState::Ready(dict) = &self.spell {
-                            let visible = visible_chars(ui, &output);
-                            if output.response.changed()
-                                || self.spell_dirty
-                                || visible != self.spell_visible
-                            {
-                                self.spell_misses =
-                                    spell::misspellings(&self.text, dict, visible.clone());
-                                self.spell_visible = visible;
-                                self.spell_dirty = false;
-                            }
-                            paint_misses(ui, &output, &self.spell_misses);
-                        }
-                        if !self.spell_misses.is_empty() {
-                            if output.response.secondary_clicked()
-                                && let Some(pos) = output.response.interact_pointer_pos()
-                            {
-                                let cursor = output.galley.cursor_from_pos(pos - output.galley_pos);
-                                self.spell_menu = self
-                                    .spell_misses
-                                    .iter()
-                                    .copied()
-                                    .find(|m| {
-                                        cursor.index >= m.cchar && cursor.index <= m.cchar + m.len
-                                    })
-                                    .map(|m| FindMatch {
-                                        byte: m.byte,
-                                        cchar: m.cchar,
-                                        len: m.len,
-                                    });
-                            }
-                            if self.spell_menu.is_some() {
-                                output.response.context_menu(|ui| {
-                                    let Some(miss) = self.spell_menu else {
-                                        return;
-                                    };
-                                    let byte_len: usize = self.text[miss.byte..]
-                                        .chars()
-                                        .take(miss.len)
-                                        .map(char::len_utf8)
-                                        .sum();
-                                    let Some(word) = self
-                                        .text
-                                        .get(miss.byte..miss.byte + byte_len)
-                                        .map(str::to_owned)
-                                    else {
-                                        return;
-                                    };
-                                    if let SpellState::Ready(dict) = &self.spell {
-                                        for suggestion in
-                                            spell::suggest(&word, dict).into_iter().take(5)
-                                        {
-                                            if ui.button(&suggestion).clicked() {
-                                                self.text.replace_range(
-                                                    miss.byte..miss.byte + byte_len,
-                                                    &suggestion,
-                                                );
-                                                self.spell_dirty = true;
-                                                self.cache_valid = false;
-                                                ui.close();
-                                            }
-                                        }
-                                        ui.separator();
-                                    }
-                                    if ui.button(t.add_to_dict).clicked() {
-                                        if let SpellState::Ready(dict) = &mut self.spell {
-                                            let _ = dict.add(&word);
-                                        }
-                                        if let Err(err) = spell::add_personal(&word) {
-                                            self.error = Some(AppError::Settings(err));
-                                        }
-                                        self.spell_dirty = true;
-                                        self.cache_valid = false;
-                                        ui.close();
-                                    }
+                        paint_misses(ui, &output, &self.spell_misses);
+                    }
+                    if !self.spell_misses.is_empty() {
+                        if output.response.secondary_clicked()
+                            && let Some(pos) = output.response.interact_pointer_pos()
+                        {
+                            let cursor = output.galley.cursor_from_pos(pos - output.galley_pos);
+                            self.spell_menu = self
+                                .spell_misses
+                                .iter()
+                                .copied()
+                                .find(|m| {
+                                    cursor.index >= m.cchar && cursor.index <= m.cchar + m.len
+                                })
+                                .map(|m| FindMatch {
+                                    byte: m.byte,
+                                    cchar: m.cchar,
+                                    len: m.len,
                                 });
-                            }
                         }
-                        if let Some(m) = self.pending_goto.take() {
-                            let rect = match_rects(&output.galley, m.cchar, m.len)
-                                .0
-                                .translate(output.galley_pos.to_vec2());
-                            ui.scroll_to_rect(rect, Some(Align::Center));
+                        if self.spell_menu.is_some() {
+                            output.response.context_menu(|ui| {
+                                let Some(miss) = self.spell_menu else {
+                                    return;
+                                };
+                                let byte_len: usize = self.text[miss.byte..]
+                                    .chars()
+                                    .take(miss.len)
+                                    .map(char::len_utf8)
+                                    .sum();
+                                let Some(word) = self
+                                    .text
+                                    .get(miss.byte..miss.byte + byte_len)
+                                    .map(str::to_owned)
+                                else {
+                                    return;
+                                };
+                                if let SpellState::Ready(dict) = &self.spell {
+                                    for suggestion in
+                                        spell::suggest(&word, dict).into_iter().take(5)
+                                    {
+                                        if ui.button(&suggestion).clicked() {
+                                            self.text.replace_range(
+                                                miss.byte..miss.byte + byte_len,
+                                                &suggestion,
+                                            );
+                                            self.spell_dirty = true;
+                                            self.cache_valid = false;
+                                            ui.close();
+                                        }
+                                    }
+                                    ui.separator();
+                                }
+                                if ui.button(t.add_to_dict).clicked() {
+                                    if let SpellState::Ready(dict) = &mut self.spell {
+                                        let _ = dict.add(&word);
+                                    }
+                                    if let Err(err) = spell::add_personal(&word) {
+                                        self.error = Some(AppError::Settings(err));
+                                    }
+                                    self.spell_dirty = true;
+                                    self.cache_valid = false;
+                                    ui.close();
+                                }
+                            });
                         }
-                    });
+                    }
+                    if let Some(m) = self.pending_goto.take() {
+                        let rect = match_rects(&output.galley, m.cchar, m.len)
+                            .0
+                            .translate(output.galley_pos.to_vec2());
+                        ui.scroll_to_rect(rect, Some(Align::Center));
+                    }
+                });
+                self.editor_scroll_y = scroll_output.state.offset.y;
             }
         });
 
@@ -1591,6 +1759,10 @@ impl eframe::App for RavnPad {
             ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.remember_position_and_save();
     }
 }
 
@@ -1710,7 +1882,7 @@ fn squiggle(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
         points.push(egui::pos2(x, if up { low } else { high }));
         up = !up;
     }
-    painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, color)));
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.0_f32, color)));
 }
 
 // A match never spans a newline (the query field is single-line) but can
@@ -1845,6 +2017,10 @@ mod tests {
             font: String::new(),
             size: 15.0,
             spellcheck: true,
+            theme: prefs::ThemePref::System,
+            line_wrap: true,
+            recent: Vec::new(),
+            positions: Vec::new(),
         };
         let (update_tx, update_rx) = mpsc::channel();
         let (spell_tx, spell_rx) = mpsc::channel();
@@ -1873,6 +2049,8 @@ mod tests {
             suggested_path: None,
             large: None,
             prefs,
+            editor_scroll_y: 0.0,
+            restore_editor_scroll: false,
             fonts: Vec::new(),
             settings_open: false,
             last_title: String::new(),
@@ -1913,16 +2091,26 @@ mod tests {
         app.update = UpdateUi::Checking { user: true };
         app.poll_update_events(&ctx);
         assert!(matches!(app.update, UpdateUi::Checking { user: true }));
-        app.update_tx.send((app.update_generation, UpdateEvent::UpToDate)).unwrap();
+        app.update_tx
+            .send((app.update_generation, UpdateEvent::UpToDate))
+            .unwrap();
         app.poll_update_events(&ctx);
         assert!(matches!(app.update, UpdateUi::UpToDate));
         app.update = UpdateUi::Checking { user: true };
-        app.update_tx.send((app.update_generation, UpdateEvent::Failed("offline".into()))).unwrap();
+        app.update_tx
+            .send((app.update_generation, UpdateEvent::Failed("offline".into())))
+            .unwrap();
         app.poll_update_events(&ctx);
         assert!(matches!(&app.update, UpdateUi::Failed(message) if message == "offline"));
-        app.update_tx.send((app.update_generation, UpdateEvent::Available {
-            version: "9.0.0".into(), url: "https://example.invalid/update.zip".into(),
-        })).unwrap();
+        app.update_tx
+            .send((
+                app.update_generation,
+                UpdateEvent::Available {
+                    version: "9.0.0".into(),
+                    url: "https://example.invalid/update.zip".into(),
+                },
+            ))
+            .unwrap();
         app.poll_update_events(&ctx);
         assert!(matches!(&app.update, UpdateUi::Available { version, .. } if version == "9.0.0"));
     }

@@ -91,13 +91,32 @@ impl LargeView {
         )
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, dialog_busy: bool, cannot_read: &str) {
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn set_offset(&mut self, offset: u64) {
+        self.offset = offset.min(self.size);
+        self.prepared_for = None;
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        dialog_busy: bool,
+        cannot_read: &str,
+        line_wrap: bool,
+    ) {
         let row_height = ui.text_style_height(&TextStyle::Monospace);
         let height = ui.available_height();
         let rows = ((height / row_height).floor() as usize).max(1);
         let bar_w = 14.0;
         let text_w = (ui.available_width() - bar_w).max(40.0);
-        let wrap_cols = wrap_columns(ui, text_w);
+        let wrap_cols = if line_wrap {
+            wrap_columns(ui, text_w)
+        } else {
+            usize::MAX
+        };
 
         let mut result = self.ensure_window(rows, wrap_cols);
 
@@ -126,11 +145,24 @@ impl LargeView {
                 Layout::top_down(Align::Min),
                 |ui| {
                     ui.set_clip_rect(ui.max_rect());
-                    ui.add(
-                        egui::Label::new(RichText::new(&self.window).monospace())
-                            .selectable(true)
-                            .extend(),
-                    );
+                    if line_wrap {
+                        ui.add(
+                            egui::Label::new(RichText::new(&self.window).monospace())
+                                .selectable(true)
+                                .extend(),
+                        );
+                    } else {
+                        egui::ScrollArea::horizontal()
+                            .id_salt("large_horizontal")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(&self.window).monospace())
+                                        .selectable(true)
+                                        .extend(),
+                                );
+                            });
+                    }
                 },
             );
 
@@ -627,6 +659,16 @@ mod tests {
         let mut file = File::open(&path).unwrap();
         let text = read_window(&mut file, 0, 8, 2, 1000).unwrap();
         assert_eq!(text, "a\nb\n");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn window_can_preserve_long_physical_lines() {
+        let path = temp("no-wrap.txt");
+        write_all(&path, b"abcdefghij\nsecond\nthird\n");
+        let mut file = File::open(&path).unwrap();
+        let text = read_window(&mut file, 0, 24, 2, usize::MAX).unwrap();
+        assert_eq!(text, "abcdefghij\nsecond\n");
         let _ = fs::remove_file(path);
     }
 

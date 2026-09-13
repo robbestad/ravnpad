@@ -13,6 +13,7 @@ static NSString *currentFont;
 static double currentSize;
 static BOOL currentSpell;
 static int currentLanguage;
+static int currentTheme;
 
 static NSString *S(const char *text) { return [NSString stringWithUTF8String:text] ?: @""; }
 static NSString *L(int id) { return S(rp_label(id)); }
@@ -42,6 +43,8 @@ static NSString *L(int id) { return S(rp_label(id)); }
 @property NSPanel *settings;
 @property NSPopUpButton *languages;
 @property NSButton *spelling;
+@property NSButton *wrapping;
+@property NSPopUpButton *themes;
 - (void)command:(NSMenuItem *)sender;
 - (void)showSettings:(id)sender;
 @end
@@ -71,7 +74,7 @@ void rp_rebuild_menus(void) {
     item(app, L(RP_SHOW_ALL), @selector(unhideAllApplications:), @"", nil, 0);
     [app addItem:NSMenuItem.separatorItem]; command(app, RP_QUIT, @"q");
     NSMenu *file = submenu(bar, L(RP_FILE));
-    command(file, RP_NEW, @"n"); command(file, RP_OPEN, @"o");
+    command(file, RP_NEW, @"n"); command(file, RP_NEW_WINDOW, @"N"); command(file, RP_OPEN, @"o");
     NSMenu *recent = submenu(file, L(RP_RECENT));
     for (NSURL *url in NSDocumentController.sharedDocumentController.recentDocumentURLs) {
         NSMenuItem *entry = item(recent, url.lastPathComponent, @selector(openRecent:), @"", delegate, 0);
@@ -160,18 +163,25 @@ void rp_rebuild_menus(void) {
 }
 - (void)changeLanguage:(NSPopUpButton *)sender { rp_action(100+(int)sender.indexOfSelectedItem); rp_tick(); }
 - (void)changeSpelling:(NSButton *)sender { (void)sender; rp_action(RP_SPELL); rp_tick(); }
+- (void)changeWrapping:(NSButton *)sender { (void)sender; rp_action(RP_WRAP); rp_tick(); }
+- (void)changeTheme:(NSPopUpButton *)sender { rp_action(RP_THEME_SYSTEM+(int)sender.indexOfSelectedItem); rp_tick(); }
 - (void)showFont:(id)sender { (void)sender; [window makeFirstResponder:editor]; [[NSFontManager sharedFontManager] setSelectedFont:editor.font isMultiple:NO]; [[NSFontManager sharedFontManager] orderFrontFontPanel:self]; }
 - (void)showSettings:(id)sender {
     (void)sender;
-    self.settings=[[NSPanel alloc] initWithContentRect:NSMakeRect(0,0,420,170) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+    self.settings=[[NSPanel alloc] initWithContentRect:NSMakeRect(0,0,420,250) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
     self.settings.title=L(RP_SETTINGS); self.settings.releasedWhenClosed=NO;
-    NSTextField *label=[NSTextField labelWithString:L(RP_LANGUAGE)]; label.frame=NSMakeRect(20,118,140,24); [self.settings.contentView addSubview:label];
-    self.languages=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(165,118,230,26) pullsDown:NO];
+    NSTextField *label=[NSTextField labelWithString:L(RP_LANGUAGE)]; label.frame=NSMakeRect(20,198,140,24); [self.settings.contentView addSubview:label];
+    self.languages=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(165,198,230,26) pullsDown:NO];
     for(int i=0;i<15;i++) [self.languages addItemWithTitle:L(100+i)];
     [self.languages selectItemAtIndex:currentLanguage];
     self.languages.target=self; self.languages.action=@selector(changeLanguage:); [self.settings.contentView addSubview:self.languages];
-    NSButton *font=[NSButton buttonWithTitle:L(RP_FONT) target:self action:@selector(showFont:)]; font.frame=NSMakeRect(20,65,170,32); [self.settings.contentView addSubview:font];
-    self.spelling=[NSButton checkboxWithTitle:L(RP_SPELL) target:self action:@selector(changeSpelling:)]; self.spelling.frame=NSMakeRect(20,22,370,26); self.spelling.state=currentSpell; [self.settings.contentView addSubview:self.spelling];
+    NSTextField *themeLabel=[NSTextField labelWithString:L(RP_THEME)]; themeLabel.frame=NSMakeRect(20,153,140,24); [self.settings.contentView addSubview:themeLabel];
+    self.themes=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(165,153,230,26) pullsDown:NO];
+    [self.themes addItemWithTitle:L(RP_THEME_SYSTEM)]; [self.themes addItemWithTitle:L(RP_THEME_LIGHT)]; [self.themes addItemWithTitle:L(RP_THEME_DARK)];
+    [self.themes selectItemAtIndex:currentTheme]; self.themes.target=self; self.themes.action=@selector(changeTheme:); [self.settings.contentView addSubview:self.themes];
+    NSButton *font=[NSButton buttonWithTitle:L(RP_FONT) target:self action:@selector(showFont:)]; font.frame=NSMakeRect(20,100,170,32); [self.settings.contentView addSubview:font];
+    self.spelling=[NSButton checkboxWithTitle:L(RP_SPELL) target:self action:@selector(changeSpelling:)]; self.spelling.frame=NSMakeRect(20,57,370,26); self.spelling.state=currentSpell; [self.settings.contentView addSubview:self.spelling];
+    self.wrapping=[NSButton checkboxWithTitle:L(RP_WRAP) target:self action:@selector(changeWrapping:)]; self.wrapping.frame=NSMakeRect(20,22,370,26); self.wrapping.state=editor.textContainer.widthTracksTextView; [self.settings.contentView addSubview:self.wrapping];
     [self.settings center]; [self.settings makeKeyAndOrderFront:nil];
 }
 @end
@@ -206,6 +216,33 @@ void rp_preferences(const char *font,double points,int spell,int language) {
     if(delegate.settings.visible) {
         [delegate.languages selectItemAtIndex:language]; delegate.spelling.state=spell;
     }
+}
+void rp_wrap(int enabled) {
+    BOOL wrap=enabled!=0;
+    scroll.hasHorizontalScroller=!wrap;
+    editor.horizontallyResizable=!wrap;
+    editor.textContainer.widthTracksTextView=wrap;
+    editor.textContainer.containerSize=NSMakeSize(wrap?scroll.contentSize.width:CGFLOAT_MAX,CGFLOAT_MAX);
+    if(delegate.settings.visible) delegate.wrapping.state=wrap;
+}
+void rp_theme(int preference) {
+    currentTheme=preference;
+    NSAppearance *appearance=nil;
+    if(preference==1) appearance=[NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    else if(preference==2) appearance=[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    NSApp.appearance=appearance;
+    if(delegate.settings.visible) [delegate.themes selectItemAtIndex:preference];
+}
+double rp_read_position(void) {
+    [editor.layoutManager ensureLayoutForTextContainer:editor.textContainer];
+    CGFloat maximum=MAX(0,editor.bounds.size.height-scroll.contentView.bounds.size.height);
+    return maximum>0?scroll.contentView.bounds.origin.y/maximum:0;
+}
+void rp_restore_position(double fraction) {
+    [editor.layoutManager ensureLayoutForTextContainer:editor.textContainer];
+    CGFloat maximum=MAX(0,editor.bounds.size.height-scroll.contentView.bounds.size.height);
+    NSPoint point=scroll.contentView.bounds.origin; point.y=maximum*MAX(0,MIN(1,fraction));
+    [scroll.contentView scrollToPoint:point]; [scroll reflectScrolledClipView:scroll.contentView];
 }
 void rp_close(void) {
     if(terminationPending) { terminationPending=NO; [NSApp replyToApplicationShouldTerminate:YES]; return; }
