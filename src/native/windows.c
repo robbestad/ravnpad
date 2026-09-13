@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <richedit.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <ole2.h>
 #include <stdlib.h>
@@ -56,6 +57,22 @@ static int system_dark(void) {
     LSTATUS result=RegGetValueW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",L"AppsUseLightTheme",RRF_RT_REG_DWORD,NULL,&light,&size);
     return result==ERROR_SUCCESS && light==0;
 }
+static void apply_window_chrome(void) {
+    if(!window) return;
+    BOOL enabled=darkTheme?TRUE:FALSE;
+    // DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on current Windows 10/11 builds.
+    // Build 17763 used 19, so retain the fallback for older supported systems.
+    HRESULT result=DwmSetWindowAttribute(window,20,&enabled,sizeof(enabled));
+    if(FAILED(result)) DwmSetWindowAttribute(window,19,&enabled,sizeof(enabled));
+    const wchar_t *controlTheme=darkTheme?L"DarkMode_Explorer":L"Explorer";
+    if(editor) SetWindowTheme(editor,controlTheme,NULL);
+    if(status) {
+        SetWindowTheme(status,controlTheme,NULL);
+        SendMessageW(status,SB_SETBKCOLOR,0,darkTheme?RGB(32,32,32):GetSysColor(COLOR_BTNFACE));
+    }
+    if(position) SetWindowTheme(position,controlTheme,NULL);
+    RedrawWindow(window,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_FRAME|RDW_ALLCHILDREN);
+}
 static void apply_colors(void) {
     darkTheme=currentTheme==2||(currentTheme==0&&system_dark());
     COLORREF background=darkTheme?RGB(30,30,30):GetSysColor(COLOR_WINDOW);
@@ -64,7 +81,7 @@ static void apply_colors(void) {
     CHARFORMAT2W format={0}; format.cbSize=sizeof(format); format.dwMask=CFM_COLOR; format.crTextColor=foreground;
     SendMessageW(editor,EM_SETCHARFORMAT,SCF_ALL,(LPARAM)&format);
     if(themeBrush) DeleteObject(themeBrush); themeBrush=CreateSolidBrush(darkTheme?RGB(32,32,32):GetSysColor(COLOR_BTNFACE));
-    InvalidateRect(window,NULL,TRUE);
+    apply_window_chrome();
 }
 void rp_rebuild_menus(void) {
     HMENU previous=menu; menu=CreateMenu();
@@ -183,6 +200,10 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
         }
         case WM_SYSCOLORCHANGE: apply_colors(); return 0;
         case WM_SETTINGCHANGE: if(currentTheme==0) apply_colors(); return 0;
+        case WM_THEMECHANGED: apply_colors(); return 0;
+        case WM_ERASEBKGND:
+            if(themeBrush) { RECT area; GetClientRect(hwnd,&area); FillRect((HDC)w,&area,themeBrush); return 1; }
+            break;
         case WM_CTLCOLORSTATIC:
             if((HWND)l==status&&themeBrush) { SetTextColor((HDC)w,darkTheme?RGB(220,220,220):GetSysColor(COLOR_BTNTEXT)); SetBkColor((HDC)w,darkTheme?RGB(32,32,32):GetSysColor(COLOR_BTNFACE)); return (LRESULT)themeBrush; }
             break;
