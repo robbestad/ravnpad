@@ -14,14 +14,15 @@
 #include "bridge.h"
 
 static HWND window, editor, status, position, findDialog;
-static HMENU menu;
+static HMENU menu, themeMenu;
 static HFONT font;
+static HBRUSH themeBrush;
 static HACCEL accelerators;
 static UINT findMessage;
 static FINDREPLACEW find;
 static wchar_t query[1024], replacement[1024], currentFont[LF_FACESIZE];
 static double currentSize;
-static int updating, busy, readonlyDocument, currentSpell, smokeTest, smokeResult, documentDirty;
+static int updating, busy, readonlyDocument, currentSpell, currentWrap=-1, currentTheme=-1, darkTheme, smokeTest, smokeResult, documentDirty;
 static UINT dpi=96;
 
 static wchar_t *wide(const char *s) {
@@ -50,17 +51,36 @@ static HMENU submenu(HMENU parent,int id) {
     HMENU child=CreatePopupMenu(); wchar_t *label=wide(rp_label(id));
     AppendMenuW(parent,MF_POPUP,(UINT_PTR)child,label?label:L""); free(label); return child;
 }
+static int system_dark(void) {
+    DWORD light=1,size=sizeof(light);
+    LSTATUS result=RegGetValueW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",L"AppsUseLightTheme",RRF_RT_REG_DWORD,NULL,&light,&size);
+    return result==ERROR_SUCCESS && light==0;
+}
+static void apply_colors(void) {
+    darkTheme=currentTheme==2||(currentTheme==0&&system_dark());
+    COLORREF background=darkTheme?RGB(30,30,30):GetSysColor(COLOR_WINDOW);
+    COLORREF foreground=darkTheme?RGB(235,235,235):GetSysColor(COLOR_WINDOWTEXT);
+    SendMessageW(editor,EM_SETBKGNDCOLOR,0,background);
+    CHARFORMAT2W format={0}; format.cbSize=sizeof(format); format.dwMask=CFM_COLOR; format.crTextColor=foreground;
+    SendMessageW(editor,EM_SETCHARFORMAT,SCF_ALL,(LPARAM)&format);
+    if(themeBrush) DeleteObject(themeBrush); themeBrush=CreateSolidBrush(darkTheme?RGB(32,32,32):GetSysColor(COLOR_BTNFACE));
+    InvalidateRect(window,NULL,TRUE);
+}
 void rp_rebuild_menus(void) {
     HMENU previous=menu; menu=CreateMenu();
     HMENU file=submenu(menu,RP_FILE);
-    entry(file,RP_NEW,L"\tCtrl+N"); entry(file,RP_OPEN,L"\tCtrl+O");
+    entry(file,RP_NEW,L"\tCtrl+N"); entry(file,RP_NEW_WINDOW,L"\tCtrl+Shift+N"); entry(file,RP_OPEN,L"\tCtrl+O");
+    HMENU recent=submenu(file,RP_RECENT); for(int i=0;i<10&&rp_label(200+i)[0];i++) entry(recent,200+i,NULL);
     entry(file,RP_SAVE,L"\tCtrl+S"); entry(file,RP_SAVE_AS,L"\tCtrl+Shift+S");
     AppendMenuW(file,MF_SEPARATOR,0,NULL); entry(file,RP_RECOVERY,NULL); entry(file,RP_QUIT,L"\tAlt+F4");
     HMENU edit=submenu(menu,RP_EDIT);
     entry(edit,RP_UNDO,L"\tCtrl+Z"); entry(edit,RP_REDO,L"\tCtrl+Y"); AppendMenuW(edit,MF_SEPARATOR,0,NULL);
     entry(edit,RP_CUT,L"\tCtrl+X"); entry(edit,RP_COPY,L"\tCtrl+C"); entry(edit,RP_PASTE,L"\tCtrl+V"); entry(edit,RP_SELECT_ALL,L"\tCtrl+A");
     AppendMenuW(edit,MF_SEPARATOR,0,NULL); entry(edit,RP_FIND,L"\tCtrl+F"); entry(edit,RP_REPLACE,L"\tCtrl+H"); entry(edit,RP_NEXT,L"\tF3");
-    HMENU settings=submenu(menu,RP_SETTINGS); entry(settings,RP_FONT,NULL); entry(settings,RP_SPELL,NULL);
+    HMENU settings=submenu(menu,RP_SETTINGS); entry(settings,RP_FONT,NULL); entry(settings,RP_SPELL,NULL); entry(settings,RP_WRAP,NULL);
+    CheckMenuItem(settings,RP_WRAP,MF_BYCOMMAND|((currentWrap==1)?MF_CHECKED:MF_UNCHECKED));
+    themeMenu=submenu(settings,RP_THEME); entry(themeMenu,RP_THEME_SYSTEM,NULL); entry(themeMenu,RP_THEME_LIGHT,NULL); entry(themeMenu,RP_THEME_DARK,NULL);
+    if(currentTheme>=0) CheckMenuRadioItem(themeMenu,RP_THEME_SYSTEM,RP_THEME_DARK,RP_THEME_SYSTEM+currentTheme,MF_BYCOMMAND);
     HMENU languages=submenu(settings,RP_LANGUAGE); for(int i=0;i<15;i++) entry(languages,100+i,NULL);
     HMENU help=submenu(menu,RP_HELP); entry(help,RP_UPDATE,NULL); entry(help,RP_ABOUT,NULL);
     SetMenu(window,menu); DrawMenuBar(window); if(previous) DestroyMenu(previous);
@@ -144,7 +164,7 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
     switch(message) {
         case WM_CREATE: {
             window=hwnd; dpi=GetDpiForWindow(hwnd);
-            editor=CreateWindowExW(0,MSFTEDIT_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN,0,0,0,0,hwnd,(HMENU)1,GetModuleHandleW(NULL),NULL);
+            editor=CreateWindowExW(0,MSFTEDIT_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_WANTRETURN,0,0,0,0,hwnd,(HMENU)1,GetModuleHandleW(NULL),NULL);
             if(!editor) return -1;
             SendMessageW(editor,EM_SETTEXTMODE,TM_PLAINTEXT|TM_MULTILEVELUNDO,0);
             SendMessageW(editor,EM_EXLIMITTEXT,0,0x7ffffffe);
@@ -161,7 +181,11 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
         case WM_DPICHANGED: {
             dpi=HIWORD(w); RECT *r=(RECT *)l; SetWindowPos(hwnd,NULL,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE); currentSize=0; return 0;
         }
-        case WM_SYSCOLORCHANGE: SendMessageW(editor,EM_SETBKGNDCOLOR,0,GetSysColor(COLOR_WINDOW)); InvalidateRect(editor,NULL,TRUE); return 0;
+        case WM_SYSCOLORCHANGE: apply_colors(); return 0;
+        case WM_SETTINGCHANGE: if(currentTheme==0) apply_colors(); return 0;
+        case WM_CTLCOLORSTATIC:
+            if((HWND)l==status&&themeBrush) { SetTextColor((HDC)w,darkTheme?RGB(220,220,220):GetSysColor(COLOR_BTNTEXT)); SetBkColor((HDC)w,darkTheme?RGB(32,32,32):GetSysColor(COLOR_BTNFACE)); return (LRESULT)themeBrush; }
+            break;
         case WM_TIMER: rp_tick(); return 0;
         case WM_HSCROLL: if((HWND)l==position&&LOWORD(w)==TB_ENDTRACK) rp_view(SendMessageW(position,TBM_GETPOS,0,0)/1000.0); return 0;
         case WM_COMMAND:
@@ -180,7 +204,7 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
             if(!documentDirty&&!busy)return TRUE;
             rp_action(RP_QUIT); rp_tick(); return !IsWindow(hwnd);
         case WM_ENDSESSION: if(w) { DestroyWindow(hwnd); } return 0;
-        case WM_DESTROY: KillTimer(hwnd,1); PostQuitMessage(0); return 0;
+        case WM_DESTROY: KillTimer(hwnd,1); if(themeBrush)DeleteObject(themeBrush); PostQuitMessage(0); return 0;
         default: return DefWindowProcW(hwnd,message,w,l);
     }
 }
@@ -194,7 +218,7 @@ void rp_run(void) {
     RegisterClassExW(&cls);
     window=CreateWindowExW(0,cls.lpszClassName,L"RavnPad",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,900,650,NULL,NULL,cls.hInstance,NULL);
     if(!window) { FreeLibrary(rich); OleUninitialize(); return; }
-    ACCEL keys[]={{FVIRTKEY|FCONTROL,'N',RP_NEW},{FVIRTKEY|FCONTROL,'O',RP_OPEN},{FVIRTKEY|FCONTROL,'S',RP_SAVE},{FVIRTKEY|FCONTROL|FSHIFT,'S',RP_SAVE_AS},{FVIRTKEY|FCONTROL,'Q',RP_QUIT},{FVIRTKEY|FCONTROL,'F',RP_FIND},{FVIRTKEY|FCONTROL,'H',RP_REPLACE},{FVIRTKEY,VK_F3,RP_NEXT},{FVIRTKEY|FCONTROL,'A',RP_SELECT_ALL}};
+    ACCEL keys[]={{FVIRTKEY|FCONTROL,'N',RP_NEW},{FVIRTKEY|FCONTROL|FSHIFT,'N',RP_NEW_WINDOW},{FVIRTKEY|FCONTROL,'O',RP_OPEN},{FVIRTKEY|FCONTROL,'S',RP_SAVE},{FVIRTKEY|FCONTROL|FSHIFT,'S',RP_SAVE_AS},{FVIRTKEY|FCONTROL,'Q',RP_QUIT},{FVIRTKEY|FCONTROL,'F',RP_FIND},{FVIRTKEY|FCONTROL,'H',RP_REPLACE},{FVIRTKEY,VK_F3,RP_NEXT},{FVIRTKEY|FCONTROL,'A',RP_SELECT_ALL}};
     accelerators=CreateAcceleratorTableW(keys,sizeof(keys)/sizeof(keys[0]));
     if(smokeTest) {
         const char *sample="Native UTF-8: \xc3\xa6\xc3\xb8\xc3\xa5 \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e \xf0\x9f\x98\x80\nSecond line";
@@ -249,6 +273,7 @@ void rp_document(const char *value,size_t length,int readonly) {
     int count=length<=INT_MAX?MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value,(int)length,NULL,0):0;
     wchar_t *w=calloc((size_t)count+1,sizeof(wchar_t));
     if(w && count) MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value,(int)length,w,count); if(w) { SETTEXTEX set={ST_DEFAULT,1200}; SendMessageW(editor,EM_SETTEXTEX,(WPARAM)&set,(LPARAM)w); free(w); }
+    apply_colors();
     SendMessageW(editor,EM_EMPTYUNDOBUFFER,0,0); SendMessageW(editor,EM_SETMODIFY,FALSE,0); SendMessageW(editor,EM_SETREADONLY,readonly,0);
     CHARRANGE start={0,0}; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&start); SendMessageW(editor,EM_SCROLLCARET,0,0); updating=0;
 }
@@ -280,6 +305,33 @@ void rp_preferences(const char *name,double points,int spell,int language) {
     if(currentSpell!=spell) { currentSpell=spell; SendMessageW(editor,EM_SETEDITSTYLE,spell?SES_CTFALLOWPROOFING:0,SES_CTFALLOWPROOFING); }
     CheckMenuRadioItem(menu,100,114,100+language,MF_BYCOMMAND);
     CheckMenuItem(menu,RP_SPELL,MF_BYCOMMAND|(spell?MF_CHECKED:MF_UNCHECKED));
+}
+void rp_wrap(int enabled) {
+    if(currentWrap==enabled) return;
+    currentWrap=enabled;
+    SendMessageW(editor,EM_SETTARGETDEVICE,0,enabled?0:1);
+    ShowScrollBar(editor,SB_HORZ,enabled?FALSE:TRUE);
+    CheckMenuItem(menu,RP_WRAP,MF_BYCOMMAND|(enabled?MF_CHECKED:MF_UNCHECKED));
+    InvalidateRect(editor,NULL,TRUE);
+}
+void rp_theme(int preference) {
+    if(currentTheme==preference) return;
+    currentTheme=preference;
+    apply_colors();
+    if(themeMenu) CheckMenuRadioItem(themeMenu,RP_THEME_SYSTEM,RP_THEME_DARK,RP_THEME_SYSTEM+preference,MF_BYCOMMAND);
+}
+double rp_read_position(void) {
+    SCROLLINFO info={0}; info.cbSize=sizeof(info); info.fMask=SIF_RANGE|SIF_PAGE|SIF_POS;
+    if(!GetScrollInfo(editor,SB_VERT,&info)) return 0;
+    int maximum=info.nMax-(int)(info.nPage?info.nPage-1:0);
+    return maximum>info.nMin?(double)(info.nPos-info.nMin)/(double)(maximum-info.nMin):0;
+}
+void rp_restore_position(double fraction) {
+    SCROLLINFO info={0}; info.cbSize=sizeof(info); info.fMask=SIF_RANGE|SIF_PAGE;
+    if(!GetScrollInfo(editor,SB_VERT,&info)) return;
+    int maximum=info.nMax-(int)(info.nPage?info.nPage-1:0);
+    info.fMask=SIF_POS; info.nPos=info.nMin+(int)((maximum-info.nMin)*(fraction<0?0:fraction>1?1:fraction));
+    SetScrollInfo(editor,SB_VERT,&info,TRUE); SendMessageW(editor,WM_VSCROLL,MAKEWPARAM(SB_THUMBPOSITION,info.nPos),0);
 }
 void rp_close(void) { DestroyWindow(window); }
 

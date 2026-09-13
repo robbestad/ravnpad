@@ -22,6 +22,10 @@ unsafe extern "C" {
         readonly: i32,
     );
     fn rp_preferences(font: *const c_char, points: f64, spell: i32, language: i32);
+    fn rp_wrap(enabled: i32);
+    fn rp_theme(preference: i32);
+    fn rp_read_position() -> f64;
+    fn rp_restore_position(fraction: f64);
     fn rp_rebuild_menus();
     fn rp_close();
     fn rp_lock();
@@ -65,12 +69,22 @@ pub fn run() {
         // No menu command is requested by the smoke scenario. Inspect the real
         // bridge queue: text-control notifications must not become app actions.
         let unexpected_actions = EVENTS.with(|events| {
-            events.borrow().iter().filter(|event| matches!(event, Event::Action(_))).count()
+            events
+                .borrow()
+                .iter()
+                .filter(|event| matches!(event, Event::Action(_)))
+                .count()
         });
         if unexpected_actions != 0 {
-            eprintln!("Native notification routing: FAIL ({unexpected_actions} unexpected commands)");
+            eprintln!(
+                "Native notification routing: FAIL ({unexpected_actions} unexpected commands)"
+            );
         }
-        std::process::exit(if unexpected_actions == 0 { native_result } else { 1 });
+        std::process::exit(if unexpected_actions == 0 {
+            native_result
+        } else {
+            1
+        });
     }
     #[cfg(windows)]
     associate::register();
@@ -152,7 +166,7 @@ pub extern "C" fn rp_label(id: i32) -> *const c_char {
 fn labels(lang: i18n::Lang) {
     let t = lang.text();
     let norwegian = matches!(lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk);
-    let mut labels = vec![c(""); 115];
+    let mut labels = vec![c(""); 210];
     for (id, value) in [
         (1, t.new),
         (2, t.open),
@@ -210,6 +224,12 @@ fn labels(lang: i18n::Lang) {
         ),
         (42, if norwegian { "Vis alle" } else { "Show All" }),
         (43, if norwegian { "Tjenester" } else { "Services" }),
+        (44, t.new_window),
+        (45, t.line_wrap),
+        (46, t.theme),
+        (47, t.theme_system),
+        (48, t.theme_light),
+        (49, t.theme_dark),
         (
             35,
             if norwegian {
@@ -223,6 +243,12 @@ fn labels(lang: i18n::Lang) {
     }
     for (i, lang) in i18n::Lang::ALL.iter().enumerate() {
         labels[100 + i] = c(lang.native_name());
+    }
+    for (i, path) in prefs::Prefs::load().recent.iter().take(10).enumerate() {
+        labels[200 + i] = c(&path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string()));
     }
     LABELS.with(|slot| *slot.borrow_mut() = labels);
 }
@@ -274,6 +300,9 @@ impl Native {
             return;
         }
         self.sync_text();
+        if self.app.large.is_none() {
+            self.app.editor_scroll_y = unsafe { rp_read_position() } as f32;
+        }
         // Native modal loops may dispatch input for an ownerless dialog. Keep the
         // document immutable while selecting paths or confirming unsaved changes.
         unsafe {
@@ -342,6 +371,7 @@ impl Native {
                 }
                 Event::Action(id) => match id {
                     1 => self.request(Action::New),
+                    44 => self.request(Action::NewWindow),
                     2 => self.request(Action::Open),
                     3 => self.request(Action::Save),
                     4 => self.request(Action::SaveAs),
@@ -352,6 +382,18 @@ impl Native {
                         self.app.save_prefs();
                     }
                     8 => self.offered_recovery = false,
+                    45 => {
+                        self.app.prefs.line_wrap = !self.app.prefs.line_wrap;
+                        self.app.save_prefs();
+                    }
+                    47..=49 => {
+                        self.app.prefs.theme = match id {
+                            48 => prefs::ThemePref::Light,
+                            49 => prefs::ThemePref::Dark,
+                            _ => prefs::ThemePref::System,
+                        };
+                        self.app.save_prefs();
+                    }
                     12 => {
                         let t = self.app.t();
                         info(
@@ -366,6 +408,12 @@ impl Native {
                         labels(self.app.prefs.lang);
                         unsafe {
                             rp_rebuild_menus();
+                        }
+                    }
+                    200..210 => {
+                        if let Some(path) = self.app.prefs.recent.get((id - 200) as usize).cloned()
+                        {
+                            self.request(Action::OpenPath(path));
                         }
                     }
                     _ => {}
@@ -385,6 +433,10 @@ impl Native {
         if self.presented != self.app.document_generation && !self.app.file_busy {
             self.presented = self.app.document_generation;
             self.changed = false;
+            labels(self.app.prefs.lang);
+            unsafe {
+                rp_rebuild_menus();
+            }
             self.binary_readonly = self.app.text.contains('\0');
             if self.app.large.is_some() {
                 self.view(None);
@@ -396,6 +448,7 @@ impl Native {
                         text.len(),
                         self.binary_readonly as i32,
                     );
+                    rp_restore_position(self.app.editor_scroll_y as f64);
                 }
             }
         }
@@ -517,6 +570,12 @@ impl Native {
                     .position(|l| *l == self.app.prefs.lang)
                     .unwrap_or(0) as i32,
             );
+            rp_wrap(self.app.prefs.line_wrap as i32);
+            rp_theme(match self.app.prefs.theme {
+                prefs::ThemePref::System => 0,
+                prefs::ThemePref::Light => 1,
+                prefs::ThemePref::Dark => 2,
+            });
             if self.app.close_requested {
                 self.app.recovery.finish();
                 rp_close();
