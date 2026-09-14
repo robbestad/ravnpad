@@ -8,7 +8,9 @@ static NSScrollView *scroll;
 static NSTextView *editor;
 static NSTextField *statusLabel;
 static NSSlider *filePosition;
-static BOOL updating, busy, readonlyDocument, smokeTest, terminationPending;
+static BOOL updating, busy, readonlyDocument, largeDocument, smokeTest, terminationPending;
+static NSString *largeQuery;
+static BOOL largeMatchCase, largeWholeWord;
 static NSString *currentFont;
 static double currentSize;
 static BOOL currentSpell;
@@ -48,6 +50,7 @@ static NSString *L(int id) { return S(rp_label(id)); }
 @property NSPopUpButton *themes;
 - (void)command:(NSMenuItem *)sender;
 - (void)showSettings:(id)sender;
+- (void)findDocument:(NSMenuItem *)sender;
 @end
 static RavnDelegate *delegate;
 
@@ -77,8 +80,12 @@ void rp_rebuild_menus(void) {
     NSMenu *file = submenu(bar, L(RP_FILE));
     command(file, RP_NEW, @"n"); command(file, RP_NEW_WINDOW, @"N"); command(file, RP_OPEN, @"o");
     NSMenu *recent = submenu(file, L(RP_RECENT));
-    for (NSURL *url in NSDocumentController.sharedDocumentController.recentDocumentURLs) {
-        NSMenuItem *entry = item(recent, url.lastPathComponent, @selector(openRecent:), @"", delegate, 0);
+    NSArray<NSURL *> *recentURLs=NSDocumentController.sharedDocumentController.recentDocumentURLs;
+    NSCountedSet *recentNames=[NSCountedSet setWithArray:[recentURLs valueForKey:@"lastPathComponent"]];
+    for (NSURL *url in recentURLs) {
+        NSString *title=url.lastPathComponent;
+        if([recentNames countForObject:title]>1) title=[NSString stringWithFormat:@"%@ — %@",title,url.URLByDeletingLastPathComponent.path];
+        NSMenuItem *entry = item(recent, title, @selector(openRecent:), @"", delegate, 0);
         entry.representedObject = url;
     }
     [file addItem:NSMenuItem.separatorItem]; command(file, RP_SAVE, @"s");
@@ -93,10 +100,10 @@ void rp_rebuild_menus(void) {
     item(edit,L(RP_PASTE),@selector(paste:),@"v",nil,0);
     item(edit,L(RP_SELECT_ALL),@selector(selectAll:),@"a",nil,0);
     [edit addItem:NSMenuItem.separatorItem];
-    item(edit,L(RP_FIND),@selector(performTextFinderAction:),@"f",nil,NSTextFinderActionShowFindInterface);
+    item(edit,L(RP_FIND),@selector(findDocument:),@"f",delegate,NSTextFinderActionShowFindInterface);
     item(edit,L(RP_REPLACE),@selector(performTextFinderAction:),@"",nil,NSTextFinderActionShowReplaceInterface);
-    item(edit,L(RP_NEXT),@selector(performTextFinderAction:),@"g",nil,NSTextFinderActionNextMatch);
-    item(edit,L(RP_PREVIOUS),@selector(performTextFinderAction:),@"G",nil,NSTextFinderActionPreviousMatch);
+    item(edit,L(RP_NEXT),@selector(findDocument:),@"g",delegate,NSTextFinderActionNextMatch);
+    item(edit,L(RP_PREVIOUS),@selector(findDocument:),@"G",delegate,NSTextFinderActionPreviousMatch);
     NSMenu *view = submenu(bar, L(RP_WINDOW)); NSApp.windowsMenu = view;
     item(view,L(RP_MINIMIZE),@selector(performMiniaturize:),@"m",nil,0);
     item(view,L(RP_ZOOM),@selector(performZoom:),@"",nil,0);
@@ -152,6 +159,22 @@ void rp_rebuild_menus(void) {
 - (void)textDidChange:(NSNotification *)notification { (void)notification; if (!updating) { window.documentEdited=YES; rp_changed(); } }
 - (void)command:(NSMenuItem *)sender { rp_action((int)sender.tag); rp_tick(); }
 - (void)openRecent:(NSMenuItem *)sender { rp_open([(NSURL *)sender.representedObject path].UTF8String); rp_tick(); }
+- (void)findDocument:(NSMenuItem *)sender {
+    if(!largeDocument) { [editor performTextFinderAction:sender]; return; }
+    if(sender.tag==NSTextFinderActionShowFindInterface || !largeQuery.length) {
+        NSAlert *alert=[NSAlert new]; alert.messageText=L(RP_FIND);
+        [alert addButtonWithTitle:L(RP_FIND)]; [alert addButtonWithTitle:L(RP_CANCEL)];
+        NSView *options=[[NSView alloc] initWithFrame:NSMakeRect(0,0,360,82)];
+        NSTextField *field=[[NSTextField alloc] initWithFrame:NSMakeRect(0,52,360,24)]; field.stringValue=largeQuery ?: @""; [options addSubview:field];
+        NSButton *matchCase=[NSButton checkboxWithTitle:@"Aa" target:nil action:nil]; matchCase.frame=NSMakeRect(0,24,160,22); matchCase.state=largeMatchCase; [options addSubview:matchCase];
+        NSButton *wholeWord=[NSButton checkboxWithTitle:L(RP_WHOLE_WORD) target:nil action:nil]; wholeWord.frame=NSMakeRect(170,24,190,22); wholeWord.state=largeWholeWord; [options addSubview:wholeWord];
+        alert.accessoryView=options; [alert.window makeFirstResponder:field];
+        if([alert runModal]!=NSAlertFirstButtonReturn || !field.stringValue.length) return;
+        largeQuery=field.stringValue; largeMatchCase=matchCase.state==NSControlStateValueOn; largeWholeWord=wholeWord.state==NSControlStateValueOn;
+    }
+    BOOL backwards=sender.tag==NSTextFinderActionPreviousMatch;
+    if(rp_find_large(largeQuery.UTF8String,backwards,largeMatchCase,largeWholeWord)) rp_tick();
+}
 - (void)moveFile:(NSSlider *)sender { rp_view(sender.doubleValue); }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; rp_action(RP_QUIT); return NO; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
@@ -166,6 +189,8 @@ void rp_rebuild_menus(void) {
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (item.action==@selector(command:)) return !busy && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
+    if (item.action==@selector(findDocument:)) return !busy;
+    if (largeDocument && item.action==@selector(performTextFinderAction:)) return NO;
     return YES;
 }
 - (void)changeLanguage:(NSPopUpButton *)sender { rp_action(100+(int)sender.indexOfSelectedItem); rp_tick(); }
@@ -206,11 +231,15 @@ char *rp_copy_text(size_t *length) {
     char *out=malloc(*length+1); if(out) { memcpy(out,bytes.bytes,*length); out[*length]=0; } return out;
 }
 void rp_free_text(char *text) { free(text); }
-void rp_state(const char *title,const char *path,const char *status,int dirty,int working,int readonly) {
+void rp_state(const char *title,const char *path,const char *status,int dirty,int working,int readonly,int large) {
     window.title=S(title); window.documentEdited=dirty; statusLabel.stringValue=S(status);
     NSString *file=S(path); NSURL *url=file.length ? [NSURL fileURLWithPath:file] : nil;
     if (![window.representedURL isEqual:url]) { window.representedURL=url; if(url) { [NSDocumentController.sharedDocumentController noteNewRecentDocumentURL:url]; rp_rebuild_menus(); } }
-    busy=working; readonlyDocument=readonly; editor.editable=!working&&!readonly; filePosition.hidden=!readonly; filePosition.enabled=!working;
+    busy=working; readonlyDocument=readonly; largeDocument=large; editor.editable=!working&&!readonly; filePosition.hidden=!readonly; filePosition.enabled=!working;
+}
+void rp_find_result(size_t length) {
+    if(!length) { NSAlert *alert=[NSAlert new]; alert.messageText=L(RP_NO_MATCHES); [alert runModal]; return; }
+    [editor setSelectedRange:NSMakeRange(0,length)]; [editor scrollRangeToVisible:NSMakeRange(0,length)];
 }
 void rp_preferences(const char *font,double points,int spell,int language) {
     NSString *name=S(font);

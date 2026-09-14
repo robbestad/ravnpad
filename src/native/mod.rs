@@ -20,7 +20,9 @@ unsafe extern "C" {
         dirty: i32,
         busy: i32,
         readonly: i32,
+        large: i32,
     );
+    fn rp_find_result(length: usize);
     fn rp_preferences(font: *const c_char, points: f64, spell: i32, language: i32);
     fn rp_wrap(enabled: i32);
     fn rp_theme(preference: i32);
@@ -38,6 +40,12 @@ enum Event {
     Open(PathBuf),
     Font(String, f32),
     View(f64),
+    FindLarge(String, bool, bool, bool),
+}
+enum SearchOutcome {
+    Found { text: String, position: u64, length: usize },
+    NotFound,
+    Failed(large::FileError),
 }
 struct Native {
     app: RavnPad,
@@ -45,11 +53,15 @@ struct Native {
     changed: bool,
     viewer_rx: mpsc::Receiver<(large::LargeView, Result<String, large::FileError>)>,
     viewer_tx: mpsc::Sender<(large::LargeView, Result<String, large::FileError>)>,
+    search_rx: mpsc::Receiver<(large::LargeView, String, SearchOutcome)>,
+    search_tx: mpsc::Sender<(large::LargeView, String, SearchOutcome)>,
     viewer_busy: bool,
     viewer_text: String,
     offered_recovery: bool,
     binary_readonly: bool,
     pending_opens: std::collections::VecDeque<PathBuf>,
+    last_find: Option<(String, u64)>,
+    large_document: bool,
 }
 thread_local! {
     static APP: RefCell<Option<Native>> = const { RefCell::new(None) };
@@ -97,6 +109,7 @@ pub fn run() {
     );
     labels(app.prefs.lang);
     let (viewer_tx, viewer_rx) = mpsc::channel();
+    let (search_tx, search_rx) = mpsc::channel();
     APP.with(|slot| {
         *slot.borrow_mut() = Some(Native {
             app,
@@ -104,11 +117,15 @@ pub fn run() {
             changed: false,
             viewer_rx,
             viewer_tx,
+            search_rx,
+            search_tx,
             viewer_busy: false,
             viewer_text: String::new(),
             offered_recovery: false,
             binary_readonly: false,
             pending_opens: std::collections::VecDeque::new(),
+            last_find: None,
+            large_document: false,
         })
     });
     unsafe {
@@ -155,6 +172,32 @@ pub extern "C" fn rp_view(fraction: f64) {
     }
 }
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn rp_find_large(
+    query: *const c_char,
+    backwards: i32,
+    match_case: i32,
+    whole_word: i32,
+) -> i32 {
+    if query.is_null() {
+        return 0;
+    }
+    let active = APP.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|native| native.large_document))
+            .unwrap_or(false)
+    });
+    if active {
+        enqueue(Event::FindLarge(
+            unsafe { CStr::from_ptr(query) }.to_string_lossy().into_owned(),
+            backwards != 0,
+            match_case != 0,
+            whole_word != 0,
+        ));
+    }
+    active as i32
+}
+#[unsafe(no_mangle)]
 pub extern "C" fn rp_label(id: i32) -> *const c_char {
     LABELS.with(|labels| {
         labels
@@ -165,7 +208,6 @@ pub extern "C" fn rp_label(id: i32) -> *const c_char {
 }
 fn labels(lang: i18n::Lang) {
     let t = lang.text();
-    let norwegian = matches!(lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk);
     let mut labels = vec![c(""); 210];
     for (id, value) in [
         (1, t.new),
@@ -184,71 +226,28 @@ fn labels(lang: i18n::Lang) {
         (21, t.settings_menu),
         (22, t.language_menu),
         (23, t.help_menu),
-        (24, if norwegian { "Rediger" } else { "Edit" }),
-        (25, if norwegian { "Angre" } else { "Undo" }),
-        (26, if norwegian { "Gjør om" } else { "Redo" }),
-        (27, if norwegian { "Klipp ut" } else { "Cut" }),
-        (28, if norwegian { "Kopier" } else { "Copy" }),
-        (29, if norwegian { "Lim inn" } else { "Paste" }),
-        (
-            30,
-            if norwegian {
-                "Marker alt"
-            } else {
-                "Select All"
-            },
-        ),
-        (31, if norwegian { "Neste" } else { "Next" }),
-        (32, if norwegian { "Forrige" } else { "Previous" }),
         (33, t.replace_all),
         (34, t.cancel),
-        (36, if norwegian { "Lukk" } else { "Close" }),
-        (37, if norwegian { "Vindu" } else { "Window" }),
-        (38, if norwegian { "Minimer" } else { "Minimize" }),
-        (39, if norwegian { "Zoom" } else { "Zoom" }),
-        (
-            40,
-            if norwegian {
-                "Skjul RavnPad"
-            } else {
-                "Hide RavnPad"
-            },
-        ),
-        (
-            41,
-            if norwegian {
-                "Skjul andre"
-            } else {
-                "Hide Others"
-            },
-        ),
-        (42, if norwegian { "Vis alle" } else { "Show All" }),
-        (43, if norwegian { "Tjenester" } else { "Services" }),
         (44, t.new_window),
         (45, t.line_wrap),
         (46, t.theme),
         (47, t.theme_system),
         (48, t.theme_light),
         (49, t.theme_dark),
-        (
-            35,
-            if norwegian {
-                "Åpne nylige"
-            } else {
-                "Open Recent"
-            },
-        ),
+        (50, t.no_matches),
+        (51, t.whole_word),
     ] {
         labels[id] = c(value);
+    }
+    for id in (24..=32).chain(35..=43) {
+        labels[id] = c(lang.native_label(id as i32).expect("native label"));
     }
     for (i, lang) in i18n::Lang::ALL.iter().enumerate() {
         labels[100 + i] = c(lang.native_name());
     }
-    for (i, path) in prefs::Prefs::load().recent.iter().take(10).enumerate() {
-        labels[200 + i] = c(&path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()));
+    let recent = prefs::Prefs::load().recent;
+    for (i, label) in prefs::recent_labels(&recent).iter().take(10).enumerate() {
+        labels[200 + i] = c(label);
     }
     LABELS.with(|slot| *slot.borrow_mut() = labels);
 }
@@ -364,6 +363,52 @@ impl Native {
                 Event::Changed => self.changed = true,
                 Event::Open(path) => self.pending_opens.push_back(path),
                 Event::View(fraction) => self.view(Some(fraction)),
+                Event::FindLarge(query, backwards, match_case, whole_word) => {
+                    if !self.viewer_busy && let Some(mut view) = self.app.large.take() {
+                        let same = self
+                            .last_find
+                            .as_ref()
+                            .is_some_and(|(previous, _)| previous == &query);
+                        let current = self
+                            .last_find
+                            .as_ref()
+                            .map(|(_, position)| *position)
+                            .unwrap_or_else(|| view.offset());
+                        let from = if same {
+                            if backwards { current } else { current.saturating_add(1) }
+                        } else {
+                            current
+                        };
+                        self.viewer_busy = true;
+                        let tx = self.search_tx.clone();
+                        thread::spawn(move || {
+                            let outcome = match view.find_from(
+                                &query,
+                                from,
+                                backwards,
+                                match_case,
+                                whole_word,
+                            ) {
+                                Ok(Some((position, byte_length))) => {
+                                    view.set_offset(position);
+                                    match view.native_window(None) {
+                                        Ok(text) => {
+                                            let length = text
+                                                .get(..byte_length)
+                                                .map(|matched| matched.encode_utf16().count())
+                                                .unwrap_or_else(|| query.encode_utf16().count());
+                                            SearchOutcome::Found { text, position, length }
+                                        }
+                                        Err(error) => SearchOutcome::Failed(error),
+                                    }
+                                }
+                                Ok(None) => SearchOutcome::NotFound,
+                                Err(error) => SearchOutcome::Failed(error),
+                            };
+                            let _ = tx.send((view, query, outcome));
+                        });
+                    }
+                }
                 Event::Font(name, size) => {
                     self.app.prefs.font = name;
                     self.app.prefs.size = size;
@@ -438,6 +483,8 @@ impl Native {
                 rp_rebuild_menus();
             }
             self.binary_readonly = self.app.text.contains('\0');
+            self.last_find = None;
+            self.large_document = self.app.large.is_some();
             if self.app.large.is_some() {
                 self.view(None);
             } else {
@@ -463,6 +510,22 @@ impl Native {
                     }
                 }
                 Err(error) => self.app.error = Some(AppError::File(error)),
+            }
+        }
+        if let Ok((view, query, outcome)) = self.search_rx.try_recv() {
+            self.viewer_busy = false;
+            self.app.large = Some(view);
+            match outcome {
+                SearchOutcome::Found { text, position, length } => {
+                    self.last_find = Some((query, position));
+                    self.viewer_text = text;
+                    unsafe {
+                        rp_document(self.viewer_text.as_ptr().cast(), self.viewer_text.len(), 1);
+                        rp_find_result(length);
+                    }
+                }
+                SearchOutcome::NotFound => unsafe { rp_find_result(0) },
+                SearchOutcome::Failed(error) => self.app.error = Some(AppError::File(error)),
             }
         }
         if !self.app.file_busy && !self.viewer_busy {
@@ -560,6 +623,7 @@ impl Native {
                 self.app.is_dirty() as i32,
                 busy as i32,
                 (self.binary_readonly || self.app.large.is_some() || self.viewer_busy) as i32,
+                self.large_document as i32,
             );
             rp_preferences(
                 font.as_ptr(),

@@ -21,6 +21,7 @@ static HBRUSH themeBrush;
 static HACCEL accelerators;
 static UINT findMessage;
 static FINDREPLACEW find;
+static DWORD findOptions=FR_DOWN;
 static wchar_t query[1024], replacement[1024], currentFont[LF_FACESIZE];
 static double currentSize;
 static int updating, busy, readonlyDocument, currentSpell, currentWrap=-1, currentTheme=-1, darkTheme, smokeTest, smokeResult, documentDirty;
@@ -120,15 +121,20 @@ static void choose_font(void) {
 static void show_find(int replace) {
     if(findDialog) { SetForegroundWindow(findDialog); return; }
     ZeroMemory(&find,sizeof(find)); find.lStructSize=sizeof(find); find.hwndOwner=window;
-    find.Flags=FR_DOWN; find.lpstrFindWhat=query; find.wFindWhatLen=1024;
+    find.Flags=findOptions; find.lpstrFindWhat=query; find.wFindWhatLen=1024;
     find.lpstrReplaceWith=replacement; find.wReplaceWithLen=1024;
     findDialog=replace?ReplaceTextW(&find):FindTextW(&find);
 }
-static int find_next(int wrap) {
+static int find_next(int wrap,int notify) {
     if(!query[0]) { show_find(0); return 0; }
+    int down=(find.Flags&FR_DOWN)!=0;
+    char *largeQuery=utf8(query);
+    if(largeQuery&&rp_find_large(largeQuery,!down,(find.Flags&FR_MATCHCASE)!=0,(find.Flags&FR_WHOLEWORD)!=0)) {
+        free(largeQuery); rp_tick(); return 1;
+    }
+    free(largeQuery);
     CHARRANGE selection; SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&selection);
     FINDTEXTEXW search={0}; search.lpstrText=query;
-    int down=(find.Flags&FR_DOWN)!=0;
     search.chrg.cpMin=down?selection.cpMax:selection.cpMin;
     search.chrg.cpMax=down?-1:0;
     WPARAM flags=find.Flags&(FR_DOWN|FR_MATCHCASE|FR_WHOLEWORD);
@@ -137,7 +143,10 @@ static int find_next(int wrap) {
         search.chrg.cpMin=down?0:GetWindowTextLengthW(editor); search.chrg.cpMax=down?-1:0;
         result=SendMessageW(editor,EM_FINDTEXTEXW,flags,(LPARAM)&search);
     }
-    if(result==-1) return 0;
+    if(result==-1) {
+        if(notify) { wchar_t *message=wide(rp_label(RP_NO_MATCHES)); MessageBoxW(window,message?message:L"No matches found",L"RavnPad",MB_OK|MB_ICONINFORMATION); free(message); }
+        return 0;
+    }
     SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&search.chrgText); SendMessageW(editor,EM_SCROLLCARET,0,0); return 1;
 }
 static void replace_selection(void) {
@@ -154,7 +163,7 @@ static void command(int id) {
         case RP_FONT: choose_font(); return;
         case RP_FIND: show_find(0); return;
         case RP_REPLACE: if(!readonlyDocument) show_find(1); return;
-        case RP_NEXT: find_next(1); return;
+        case RP_NEXT: find_next(1,1); return;
         case RP_UNDO: SendMessageW(editor,EM_UNDO,0,0); return;
         case RP_REDO: SendMessageW(editor,EM_REDO,0,0); return;
         case RP_CUT: SendMessageW(editor,WM_CUT,0,0); return;
@@ -167,13 +176,14 @@ static void command(int id) {
 static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
     if(message==findMessage && findMessage) {
         FINDREPLACEW *event=(FINDREPLACEW *)l;
+        findOptions=event->Flags&(FR_DOWN|FR_MATCHCASE|FR_WHOLEWORD);
         if(event->Flags&FR_DIALOGTERM) findDialog=NULL;
-        else if(event->Flags&FR_FINDNEXT) find_next(1);
-        else if(event->Flags&FR_REPLACE) { replace_selection(); find_next(1); }
+        else if(event->Flags&FR_FINDNEXT) find_next(1,1);
+        else if(event->Flags&FR_REPLACE) { replace_selection(); find_next(1,1); }
         else if((event->Flags&FR_REPLACEALL)&&!readonlyDocument&&!busy&&query[0]) {
             CHARRANGE start={0,0}; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&start); find.Flags|=FR_DOWN;
             SendMessageW(editor,WM_SETREDRAW,FALSE,0);
-            while(find_next(0)) replace_selection();
+            while(find_next(0,0)) replace_selection();
             SendMessageW(editor,WM_SETREDRAW,TRUE,0); InvalidateRect(editor,NULL,TRUE);
         }
         return 0;
@@ -309,8 +319,9 @@ char *rp_copy_text(size_t *length) {
     char *out=utf8(value); free(value); if(out)*length=strlen(out); return out;
 }
 void rp_free_text(char *text) { free(text); }
-void rp_state(const char *title,const char *path,const char *value,int dirty,int working,int readonly) {
-    (void)path; documentDirty=dirty; text(window,title); text(status,value); busy=working; readonlyDocument=readonly;
+void rp_state(const char *title,const char *path,const char *value,int dirty,int working,int readonly,int large) {
+    (void)path; (void)large; documentDirty=dirty; text(window,title); text(status,value); busy=working; readonlyDocument=readonly;
+    if(findDialog) EnableWindow(findDialog,!working);
     SendMessageW(editor,EM_SETREADONLY,working||readonly,0); EnableWindow(position,!working); ShowWindow(position,readonly?SW_SHOW:SW_HIDE);
     EnableMenuItem(menu,RP_SAVE,MF_BYCOMMAND|((working||readonly)?MF_GRAYED:MF_ENABLED));
     EnableMenuItem(menu,RP_SAVE_AS,MF_BYCOMMAND|((working||readonly)?MF_GRAYED:MF_ENABLED));
@@ -326,6 +337,10 @@ void rp_preferences(const char *name,double points,int spell,int language) {
     if(currentSpell!=spell) { currentSpell=spell; SendMessageW(editor,EM_SETEDITSTYLE,spell?SES_CTFALLOWPROOFING:0,SES_CTFALLOWPROOFING); }
     CheckMenuRadioItem(menu,100,114,100+language,MF_BYCOMMAND);
     CheckMenuItem(menu,RP_SPELL,MF_BYCOMMAND|(spell?MF_CHECKED:MF_UNCHECKED));
+}
+void rp_find_result(size_t length) {
+    if(!length) { wchar_t *message=wide(rp_label(RP_NO_MATCHES)); MessageBoxW(window,message?message:L"No matches found",L"RavnPad",MB_OK|MB_ICONINFORMATION); free(message); return; }
+    CHARRANGE match={0,(LONG)length}; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&match); SendMessageW(editor,EM_SCROLLCARET,0,0);
 }
 void rp_wrap(int enabled) {
     if(currentWrap==enabled) return;
