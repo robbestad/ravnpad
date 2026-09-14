@@ -109,9 +109,15 @@ void rp_rebuild_menus(void) {
     (void)notification;
     window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,900,600) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
     window.delegate=self; window.title=@"RavnPad"; window.minSize=NSMakeSize(420,300);
-    window.releasedWhenClosed=NO; [window setFrameAutosaveName:@"RavnPadDocument"];
+    window.releasedWhenClosed=NO;
+    if(smokeTest) [window setContentSize:NSMakeSize(1100,780)];
+    else [window setFrameAutosaveName:@"RavnPadDocument"];
     NSView *content=window.contentView;
-    scroll=[[NSScrollView alloc] initWithFrame:NSMakeRect(0,28,900,572)];
+    // Autosave may restore a different size before the subviews are created.
+    // Autoresizing preserves their initial margins, so derive those from the
+    // actual content bounds rather than the default window dimensions.
+    NSSize size=content.bounds.size;
+    scroll=[[NSScrollView alloc] initWithFrame:NSMakeRect(0,28,size.width,size.height-28)];
     scroll.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
     scroll.hasVerticalScroller=YES; scroll.hasHorizontalScroller=NO; scroll.borderType=NSNoBorder;
     editor=[[RavnTextView alloc] initWithFrame:scroll.contentView.bounds];
@@ -130,10 +136,10 @@ void rp_rebuild_menus(void) {
     editor.font=[NSFont monospacedSystemFontOfSize:15 weight:NSFontWeightRegular];
     editor.delegate=self; scroll.documentView=editor; [content addSubview:scroll];
     statusLabel=[NSTextField labelWithString:@""];
-    statusLabel.frame=NSMakeRect(12,5,870,18); statusLabel.autoresizingMask=NSViewWidthSizable;
+    statusLabel.frame=NSMakeRect(12,5,size.width-30,18); statusLabel.autoresizingMask=NSViewWidthSizable;
     statusLabel.font=[NSFont systemFontOfSize:NSFont.smallSystemFontSize]; statusLabel.textColor=NSColor.secondaryLabelColor;
     [content addSubview:statusLabel];
-    filePosition=[[NSSlider alloc] initWithFrame:NSMakeRect(650,3,230,22)];
+    filePosition=[[NSSlider alloc] initWithFrame:NSMakeRect(size.width-250,3,230,22)];
     filePosition.minValue=0; filePosition.maxValue=1; filePosition.target=self; filePosition.action=@selector(moveFile:);
     filePosition.continuous=NO; filePosition.autoresizingMask=NSViewMinXMargin; filePosition.hidden=YES;
     filePosition.accessibilityLabel=@"File position"; [content addSubview:filePosition];
@@ -254,6 +260,17 @@ void rp_close(void) {
     [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0] atStart:NO];
 }
 
+static BOOL layoutIsValid(void) {
+    [window.contentView layoutSubtreeIfNeeded];
+    NSSize size=window.contentView.bounds.size;
+    NSRect frame=scroll.frame;
+    return fabs(frame.origin.x)<0.5 && fabs(frame.origin.y-28)<0.5
+        && fabs(frame.size.width-size.width)<0.5
+        && fabs(NSMaxY(frame)-size.height)<0.5
+        && fabs(NSMaxX(statusLabel.frame)-(size.width-18))<0.5
+        && fabs(NSMaxX(filePosition.frame)-(size.width-20))<0.5;
+}
+
 int rp_smoke_test(void) {
     @autoreleasepool {
         smokeTest=YES; [NSApplication sharedApplication]; delegate=[RavnDelegate new];
@@ -261,8 +278,12 @@ int rp_smoke_test(void) {
         const char *sample="Native UTF-8: æøå 日本語 😀\nSecond line";
         rp_document(sample,strlen(sample),0);
         size_t length=0; char *copy=rp_copy_text(&length);
-        BOOL valid=copy && length==strlen(sample) && memcmp(copy,sample,length)==0;
+        BOOL valid=layoutIsValid() && copy && length==strlen(sample) && memcmp(copy,sample,length)==0;
         rp_free_text(copy);
+        [window setContentSize:NSMakeSize(420,300)];
+        valid=layoutIsValid() && valid;
+        [window setContentSize:NSMakeSize(1300,900)];
+        valid=layoutIsValid() && valid;
         [editor.undoManager beginUndoGrouping];
         [editor insertText:@"!" replacementRange:NSMakeRange(editor.string.length,0)];
         [editor.undoManager endUndoGrouping];
