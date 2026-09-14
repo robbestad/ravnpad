@@ -61,6 +61,7 @@ struct Native {
     binary_readonly: bool,
     pending_opens: std::collections::VecDeque<PathBuf>,
     last_find: Option<(String, u64)>,
+    large_document: bool,
 }
 thread_local! {
     static APP: RefCell<Option<Native>> = const { RefCell::new(None) };
@@ -124,6 +125,7 @@ pub fn run() {
             binary_readonly: false,
             pending_opens: std::collections::VecDeque::new(),
             last_find: None,
+            large_document: false,
         })
     });
     unsafe {
@@ -182,7 +184,7 @@ pub unsafe extern "C" fn rp_find_large(
     let active = APP.with(|slot| {
         slot.try_borrow()
             .ok()
-            .and_then(|guard| guard.as_ref().map(|native| native.app.large.is_some()))
+            .and_then(|guard| guard.as_ref().map(|native| native.large_document))
             .unwrap_or(false)
     });
     if active {
@@ -470,6 +472,7 @@ impl Native {
             }
             self.binary_readonly = self.app.text.contains('\0');
             self.last_find = None;
+            self.large_document = self.app.large.is_some();
             if self.app.large.is_some() {
                 self.view(None);
             } else {
@@ -608,7 +611,7 @@ impl Native {
                 self.app.is_dirty() as i32,
                 busy as i32,
                 (self.binary_readonly || self.app.large.is_some() || self.viewer_busy) as i32,
-                self.app.large.is_some() as i32,
+                self.large_document as i32,
             );
             rp_preferences(
                 font.as_ptr(),

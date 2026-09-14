@@ -321,6 +321,7 @@ char *rp_copy_text(size_t *length) {
 void rp_free_text(char *text) { free(text); }
 void rp_state(const char *title,const char *path,const char *value,int dirty,int working,int readonly,int large) {
     (void)path; (void)large; documentDirty=dirty; text(window,title); text(status,value); busy=working; readonlyDocument=readonly;
+    if(findDialog) EnableWindow(findDialog,!working);
     SendMessageW(editor,EM_SETREADONLY,working||readonly,0); EnableWindow(position,!working); ShowWindow(position,readonly?SW_SHOW:SW_HIDE);
     EnableMenuItem(menu,RP_SAVE,MF_BYCOMMAND|((working||readonly)?MF_GRAYED:MF_ENABLED));
     EnableMenuItem(menu,RP_SAVE_AS,MF_BYCOMMAND|((working||readonly)?MF_GRAYED:MF_ENABLED));

@@ -84,7 +84,7 @@ Unsaved changes ask before New, Open, Quit, and drop. Only UTF-8 is supported.
 
 **Windows:** Settings contains language, font and spelling options. Ctrl+F opens the native Find dialog; Ctrl+H opens Replace. Native text services provide input-method and proofing support where installed.
 
-Files over 16 MiB remain read-only; the file-position slider loads a bounded window in the background, while Find scans the complete file. Linux retains the egui interface.
+Native macOS and Windows builds edit files up to 16 MiB. Linux retains the measured 2 MiB edit limit for the egui interface. Larger files are read-only; the file-position slider loads a bounded window in the background, while native Find scans the complete file.
 
 Theme, recent-file, reading-position and line-wrapping preferences are remembered. File dialogs and alerts use the operating system.
 
