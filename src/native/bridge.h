@@ -34,4 +34,5 @@ void rp_rebuild_menus(void);
 void rp_close(void);
 void rp_lock(void);
 void rp_cancel_close(void);
+int rp_confirm(const char *title, const char *body, const char *accept, const char *discard, const char *cancel);
 #endif
