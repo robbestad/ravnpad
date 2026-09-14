@@ -315,6 +315,9 @@ void rp_run(void) {
             int firstBefore=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
             SCROLLINFO scrollBefore={0}; scrollBefore.cbSize=sizeof(scrollBefore); scrollBefore.fMask=SIF_ALL;
             GetScrollInfo(editor,SB_VERT,&scrollBefore);
+            UINT smokeWheelLines=3;
+            SystemParametersInfoW(SPI_GETWHEELSCROLLLINES,0,&smokeWheelLines,0);
+            int wheelScrollingEnabled=smokeWheelLines!=0;
             SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-WHEEL_DELTA),0);
             int firstAfter=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
             SCROLLINFO scrollAfter={0}; scrollAfter.cbSize=sizeof(scrollAfter); scrollAfter.fMask=SIF_ALL;
@@ -322,7 +325,7 @@ void rp_run(void) {
             CHARRANGE selectionAfterWheel={0};
             SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&selectionAfterWheel);
             int interactionValid=mouseSelection.cpMax>mouseSelection.cpMin
-                &&firstAfter>firstBefore
+                &&(wheelScrollingEnabled?firstAfter>firstBefore:firstAfter==firstBefore)
                 &&selectionAfterWheel.cpMin==mouseSelection.cpMin
                 &&selectionAfterWheel.cpMax==mouseSelection.cpMax;
             if(!interactionValid) fprintf(stderr,"Mouse/scroll smoke: selection %ld..%ld -> %ld..%ld, first line %d -> %d, scroll %d/%d/%u -> %d/%d/%u\n",
@@ -335,7 +338,8 @@ void rp_run(void) {
             int firstAfterHalf=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
             SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-(WHEEL_DELTA/2)),0);
             int firstAfterFull=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
-            valid=valid&&firstAfterHalf==0&&firstAfterFull>0;
+            valid=valid&&firstAfterHalf==0
+                &&(wheelScrollingEnabled?firstAfterFull>0:firstAfterFull==0);
             SendMessageW(editor,WM_VSCROLL,SB_PAGEDOWN,0);
             SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-WHEEL_DELTA),0);
             SendMessageW(editor,WM_VSCROLL,SB_BOTTOM,0);
