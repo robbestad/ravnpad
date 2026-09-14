@@ -109,7 +109,13 @@ static void resize(void) {
     MoveWindow(status,0,rect.bottom-bar,rect.right,bar,TRUE);
     MoveWindow(position,rect.right-MulDiv(230,dpi,96),rect.bottom-bar, MulDiv(220,dpi,96),bar,TRUE);
     RECT textRect; GetClientRect(editor,&textRect);
-    int margin=MulDiv(12,dpi,96); InflateRect(&textRect,-margin,-margin);
+    int margin=MulDiv(12,dpi,96);
+    // Rich Edit does not include a deflated bottom edge in its maximum scroll
+    // position. Keeping a bottom inset therefore leaves the final visual row
+    // partially clipped when the scrollbar reaches the end. Retain the top
+    // and side padding, but let the formatting rectangle reach the viewport's
+    // bottom edge.
+    textRect.left+=margin; textRect.right-=margin; textRect.top+=margin;
     SendMessageW(editor,EM_SETRECT,0,(LPARAM)&textRect);
 }
 static void choose_font(void) {
@@ -191,7 +197,7 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
     switch(message) {
         case WM_CREATE: {
             window=hwnd; dpi=GetDpiForWindow(hwnd);
-            editor=CreateWindowExW(0,MSFTEDIT_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_WANTRETURN,0,0,0,0,hwnd,(HMENU)1,GetModuleHandleW(NULL),NULL);
+            editor=CreateWindowExW(0,MSFTEDIT_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_WANTRETURN|ES_NOHIDESEL,0,0,0,0,hwnd,(HMENU)1,GetModuleHandleW(NULL),NULL);
             if(!editor) return -1;
             SendMessageW(editor,EM_SETTEXTMODE,TM_PLAINTEXT|TM_MULTILEVELUNDO,0);
             SendMessageW(editor,EM_EXLIMITTEXT,0,0x7ffffffe);
@@ -256,6 +262,7 @@ void rp_run(void) {
         rp_document(sample,strlen(sample),0);
         size_t length=0; char *copy=rp_copy_text(&length);
         int valid=copy && length==strlen(sample) && memcmp(copy,sample,length)==0; rp_free_text(copy);
+        valid=valid&&((GetWindowLongPtrW(editor,GWL_STYLE)&ES_NOHIDESEL)!=0);
         CHARRANGE end={-1,-1}; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&end);
         SendMessageW(editor,EM_REPLACESEL,TRUE,(LPARAM)L"!");
         valid=valid && SendMessageW(editor,EM_CANUNDO,0,0);
@@ -275,6 +282,10 @@ void rp_run(void) {
             rp_document(large,largeLength,0);
             rp_preferences("Consolas",15,0,0);
             ShowWindow(window,SW_SHOWNOACTIVATE); UpdateWindow(window);
+            RECT clientRect={0},formatRect={0};
+            GetClientRect(editor,&clientRect); SendMessageW(editor,EM_GETRECT,0,(LPARAM)&formatRect);
+            valid=valid&&formatRect.top>clientRect.top&&formatRect.left>clientRect.left
+                &&formatRect.right<clientRect.right&&formatRect.bottom==clientRect.bottom;
             SendMessageW(editor,WM_VSCROLL,SB_PAGEDOWN,0);
             SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-WHEEL_DELTA),0);
             SendMessageW(editor,WM_VSCROLL,SB_BOTTOM,0);
