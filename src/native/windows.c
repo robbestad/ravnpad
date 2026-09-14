@@ -109,7 +109,13 @@ static void resize(void) {
     MoveWindow(status,0,rect.bottom-bar,rect.right,bar,TRUE);
     MoveWindow(position,rect.right-MulDiv(230,dpi,96),rect.bottom-bar, MulDiv(220,dpi,96),bar,TRUE);
     RECT textRect; GetClientRect(editor,&textRect);
-    int margin=MulDiv(12,dpi,96); InflateRect(&textRect,-margin,-margin);
+    int margin=MulDiv(12,dpi,96);
+    // Rich Edit does not include a deflated bottom edge in its maximum scroll
+    // position. Keeping a bottom inset therefore leaves the final visual row
+    // partially clipped when the scrollbar reaches the end. Retain the top
+    // and side padding, but let the formatting rectangle reach the viewport's
+    // bottom edge.
+    textRect.left+=margin; textRect.right-=margin; textRect.top+=margin;
     SendMessageW(editor,EM_SETRECT,0,(LPARAM)&textRect);
 }
 static void choose_font(void) {
@@ -275,6 +281,10 @@ void rp_run(void) {
             rp_document(large,largeLength,0);
             rp_preferences("Consolas",15,0,0);
             ShowWindow(window,SW_SHOWNOACTIVATE); UpdateWindow(window);
+            RECT clientRect={0},formatRect={0};
+            GetClientRect(editor,&clientRect); SendMessageW(editor,EM_GETRECT,0,(LPARAM)&formatRect);
+            valid=valid&&formatRect.top>clientRect.top&&formatRect.left>clientRect.left
+                &&formatRect.right<clientRect.right&&formatRect.bottom==clientRect.bottom;
             SendMessageW(editor,WM_VSCROLL,SB_PAGEDOWN,0);
             SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-WHEEL_DELTA),0);
             SendMessageW(editor,WM_VSCROLL,SB_BOTTOM,0);
