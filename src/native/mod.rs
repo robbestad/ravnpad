@@ -32,6 +32,13 @@ unsafe extern "C" {
     fn rp_close();
     fn rp_lock();
     fn rp_cancel_close();
+    fn rp_confirm(
+        title: *const c_char,
+        body: *const c_char,
+        accept: *const c_char,
+        discard: *const c_char,
+        cancel: *const c_char,
+    ) -> i32;
 }
 
 enum Event {
@@ -73,6 +80,32 @@ fn c(text: &str) -> CString {
 }
 fn enqueue(event: Event) {
     EVENTS.with(|events| events.borrow_mut().push(event));
+}
+fn confirm(
+    title: &str,
+    body: &str,
+    accept: &str,
+    discard: &str,
+    cancel: &str,
+) -> native_dialog::Confirm {
+    let title = c(title);
+    let body = c(body);
+    let accept = c(accept);
+    let discard = c(discard);
+    let cancel = c(cancel);
+    match unsafe {
+        rp_confirm(
+            title.as_ptr(),
+            body.as_ptr(),
+            accept.as_ptr(),
+            discard.as_ptr(),
+            cancel.as_ptr(),
+        )
+    } {
+        1 => native_dialog::Confirm::Save,
+        2 => native_dialog::Confirm::Discard,
+        _ => native_dialog::Confirm::Cancel,
+    }
 }
 
 pub fn run() {
@@ -314,7 +347,7 @@ impl Native {
         self.app.request(action);
         if let Some(action) = self.app.confirm.take() {
             let t = self.app.t();
-            match native_dialog::unsaved(
+            match confirm(
                 t.unsaved_title,
                 &t.unsaved(&self.app.display_name()),
                 t.save,
@@ -537,7 +570,7 @@ impl Native {
                     unsafe {
                         rp_lock();
                     }
-                    match native_dialog::unsaved(
+                    match confirm(
                         t.recovery,
                         &candidate.preview,
                         t.restore,
@@ -571,7 +604,7 @@ impl Native {
         match std::mem::replace(&mut self.app.update, UpdateUi::Idle) {
             UpdateUi::Available { version, url } => {
                 if matches!(
-                    native_dialog::unsaved(
+                    confirm(
                         t.update_available_title,
                         &t.update_available(&version, update::CURRENT),
                         t.update_now,

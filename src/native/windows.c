@@ -441,3 +441,17 @@ int rp_smoke_test(void) { smokeTest=1; smokeResult=1; rp_run(); return smokeResu
 void rp_lock(void) { busy=1; SendMessageW(editor,EM_SETREADONLY,TRUE,0); }
 
 void rp_cancel_close(void) {}
+
+int rp_confirm(const char *title,const char *body,const char *accept,const char *discard,const char *cancel) {
+    wchar_t *wideTitle=wide(title), *wideBody=wide(body), *wideAccept=wide(accept), *wideDiscard=wide(discard), *wideCancel=wide(cancel);
+    TASKDIALOG_BUTTON buttons[]={{1,wideAccept},{2,wideDiscard},{IDCANCEL,wideCancel}};
+    TASKDIALOGCONFIG config={0}; config.cbSize=sizeof(config); config.hwndParent=window;
+    config.dwFlags=TDF_POSITION_RELATIVE_TO_WINDOW|TDF_SIZE_TO_CONTENT;
+    config.pszWindowTitle=L"RavnPad"; config.pszMainInstruction=wideTitle; config.pszContent=wideBody;
+    config.pszMainIcon=TD_WARNING_ICON; config.cButtons=3; config.pButtons=buttons; config.nDefaultButton=1;
+    int selected=IDCANCEL;
+    HRESULT result=TaskDialogIndirect(&config,&selected,NULL,NULL);
+    free(wideTitle); free(wideBody); free(wideAccept); free(wideDiscard); free(wideCancel);
+    if(FAILED(result)) return 0;
+    return selected==1?1:selected==2?2:0;
+}

@@ -330,3 +330,20 @@ int rp_smoke_test(void) {
 void rp_lock(void) { busy=YES; editor.editable=NO; }
 
 void rp_cancel_close(void) { if(terminationPending) { terminationPending=NO; [NSApp replyToApplicationShouldTerminate:NO]; } }
+
+int rp_confirm(const char *title,const char *body,const char *accept,const char *discard,const char *cancel) {
+    NSAlert *alert=[NSAlert new];
+    alert.alertStyle=NSAlertStyleWarning;
+    alert.messageText=S(title);
+    alert.informativeText=S(body);
+    [alert addButtonWithTitle:S(accept)];
+    [alert addButtonWithTitle:S(discard)];
+    [alert addButtonWithTitle:S(cancel)];
+    // NSAlert creates its window lazily. Assign the document window's effective
+    // appearance after adding the buttons so forced light/dark themes are kept.
+    alert.window.appearance=window.effectiveAppearance;
+    NSModalResponse response=[alert runModal];
+    if(response==NSAlertFirstButtonReturn) return 1;
+    if(response==NSAlertSecondButtonReturn) return 2;
+    return 0;
+}
