@@ -190,7 +190,10 @@ static void extend_selection_to(LONG target) {
     SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&selection);
     LONG anchor=selection.cpMin==selection.cpMax?selection.cpMin:selectionAnchor;
     if(anchor<0) anchor=selection.cpMin;
-    CHARRANGE extended={anchor<target?anchor:target,anchor<target?target:anchor};
+    // Rich Edit accepts a reversed range and keeps cpMax as the active end.
+    // Preserve that direction so keyboard extension and EM_SCROLLCARET continue
+    // from the point the user Shift-clicked, including backward selections.
+    CHARRANGE extended={anchor,target};
     SetFocus(editor);
     SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&extended);
     SendMessageW(editor,EM_SCROLLCARET,0,0);
@@ -347,7 +350,7 @@ void rp_run(void) {
     RegisterClassExW(&cls);
     window=CreateWindowExW(0,cls.lpszClassName,L"RavnPad",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,900,650,NULL,NULL,cls.hInstance,NULL);
     if(!window) { FreeLibrary(rich); OleUninitialize(); return; }
-    ACCEL keys[]={{FVIRTKEY|FCONTROL,'N',RP_NEW},{FVIRTKEY|FCONTROL|FSHIFT,'N',RP_NEW_WINDOW},{FVIRTKEY|FCONTROL,'O',RP_OPEN},{FVIRTKEY|FCONTROL,'S',RP_SAVE},{FVIRTKEY|FCONTROL|FSHIFT,'S',RP_SAVE_AS},{FVIRTKEY|FCONTROL,'Q',RP_QUIT},{FVIRTKEY|FCONTROL,'Z',RP_UNDO},{FVIRTKEY|FCONTROL,'Y',RP_REDO},{FVIRTKEY|FCONTROL,'X',RP_CUT},{FVIRTKEY|FCONTROL,'C',RP_COPY},{FVIRTKEY|FCONTROL,'V',RP_PASTE},{FVIRTKEY|FCONTROL,'F',RP_FIND},{FVIRTKEY|FCONTROL,'H',RP_REPLACE},{FVIRTKEY,VK_F3,RP_NEXT},{FVIRTKEY|FCONTROL,'A',RP_SELECT_ALL}};
+    ACCEL keys[]={{FVIRTKEY|FCONTROL,'N',RP_NEW},{FVIRTKEY|FCONTROL|FSHIFT,'N',RP_NEW_WINDOW},{FVIRTKEY|FCONTROL,'O',RP_OPEN},{FVIRTKEY|FCONTROL,'S',RP_SAVE},{FVIRTKEY|FCONTROL|FSHIFT,'S',RP_SAVE_AS},{FVIRTKEY|FCONTROL,'Q',RP_QUIT},{FVIRTKEY|FCONTROL,'F',RP_FIND},{FVIRTKEY|FCONTROL,'H',RP_REPLACE},{FVIRTKEY,VK_F3,RP_NEXT},{FVIRTKEY|FCONTROL,'A',RP_SELECT_ALL}};
     accelerators=CreateAcceleratorTableW(keys,sizeof(keys)/sizeof(keys[0]));
     if(smokeTest) {
         const char *sample="Native UTF-8: \xc3\xa6\xc3\xb8\xc3\xa5 \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e \xf0\x9f\x98\x80\nSecond line";
@@ -385,6 +388,11 @@ void rp_run(void) {
             POINTL shiftPoint={0}; SendMessageW(editor,EM_POSFROMCHAR,(WPARAM)&shiftPoint,35);
             SendMessageW(editor,WM_LBUTTONDOWN,MK_SHIFT,MAKELPARAM((short)shiftPoint.x,(short)shiftPoint.y));
             CHARRANGE shifted={0}; SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&shifted);
+            valid=valid&&shifted.cpMin==5&&shifted.cpMax==35;
+            caret.cpMin=35; caret.cpMax=35; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&caret); selectionAnchor=-1;
+            SendMessageW(editor,EM_POSFROMCHAR,(WPARAM)&shiftPoint,5);
+            SendMessageW(editor,WM_LBUTTONDOWN,MK_SHIFT,MAKELPARAM((short)shiftPoint.x,(short)shiftPoint.y));
+            SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&shifted);
             valid=valid&&shifted.cpMin==5&&shifted.cpMax==35;
             SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&mouseSelection); selectionAnchor=mouseSelection.cpMin;
             SendMessageW(editor,WM_VSCROLL,SB_TOP,0);
