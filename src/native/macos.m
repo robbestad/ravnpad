@@ -13,7 +13,8 @@ static NSString *currentFont;
 static double currentSize;
 static BOOL currentSpell;
 static int currentLanguage;
-static int currentTheme;
+static int currentWrap=-1;
+static int currentTheme=-1;
 
 static NSString *S(const char *text) { return [NSString stringWithUTF8String:text] ?: @""; }
 static NSString *L(int id) { return S(rp_label(id)); }
@@ -219,6 +220,8 @@ void rp_preferences(const char *font,double points,int spell,int language) {
 }
 void rp_wrap(int enabled) {
     BOOL wrap=enabled!=0;
+    if(currentWrap==wrap) return;
+    currentWrap=wrap;
     scroll.hasHorizontalScroller=!wrap;
     editor.horizontallyResizable=!wrap;
     editor.textContainer.widthTracksTextView=wrap;
@@ -226,6 +229,7 @@ void rp_wrap(int enabled) {
     if(delegate.settings.visible) delegate.wrapping.state=wrap;
 }
 void rp_theme(int preference) {
+    if(currentTheme==preference) return;
     currentTheme=preference;
     NSAppearance *appearance=nil;
     if(preference==1) appearance=[NSAppearance appearanceNamed:NSAppearanceNameAqua];
