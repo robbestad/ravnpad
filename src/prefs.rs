@@ -144,6 +144,32 @@ impl Prefs {
     }
 }
 
+pub fn recent_labels(paths: &[PathBuf]) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut counts = HashMap::new();
+    for path in paths {
+        *counts.entry(path.file_name().map(|name| name.to_os_string())).or_insert(0usize) += 1;
+    }
+    paths
+        .iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let key = path.file_name().map(|value| value.to_os_string());
+            if counts.get(&key).copied().unwrap_or(0) > 1 {
+                path.parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(|parent| format!("{name} — {}", parent.display()))
+                    .unwrap_or(name)
+            } else {
+                name
+            }
+        })
+        .collect()
+}
+
 fn encode_recent(paths: &[PathBuf]) -> String {
     let values: Vec<_> = paths
         .iter()
@@ -240,6 +266,19 @@ mod tests {
 
         let positions = vec![(PathBuf::from("log.txt"), 123.5, 9876)];
         assert_eq!(decode_positions(&encode_positions(&positions)), positions);
+    }
+
+    #[test]
+    fn duplicate_recent_names_include_their_folder() {
+        let paths = vec![
+            PathBuf::from("one/notater.txt"),
+            PathBuf::from("two/notater.txt"),
+            PathBuf::from("unique.txt"),
+        ];
+        assert_eq!(
+            recent_labels(&paths),
+            ["notater.txt — one", "notater.txt — two", "unique.txt"]
+        );
     }
 
     #[test]

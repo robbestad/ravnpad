@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, TextStyle};
 
 /// Files larger than this are opened as a read-only windowed view.
-pub const EDIT_LIMIT: u64 = 2 * 1024 * 1024;
+pub const EDIT_LIMIT: u64 = 16 * 1024 * 1024;
 
 const LOOKBACK: u64 = 256 * 1024;
 const MAX_WINDOW: usize = 256 * 1024;
@@ -98,6 +98,34 @@ impl LargeView {
     pub fn set_offset(&mut self, offset: u64) {
         self.offset = offset.min(self.size);
         self.prepared_for = None;
+    }
+
+    pub fn find_from(
+        &self,
+        query: &str,
+        from: u64,
+        backwards: bool,
+        match_case: bool,
+        whole_word: bool,
+    ) -> Result<Option<u64>, FileError> {
+        if query.is_empty() || self.size == 0 {
+            return Ok(None);
+        }
+        let mut file = File::open(&self.path).map_err(FileError::Read)?;
+        let from = from.min(self.size);
+        let first = if backwards {
+            find_bytes(&mut file, 0, from, query.as_bytes(), true, match_case, whole_word)?
+        } else {
+            find_bytes(&mut file, from, self.size, query.as_bytes(), false, match_case, whole_word)?
+        };
+        if first.is_some() {
+            return Ok(first);
+        }
+        if backwards {
+            find_bytes(&mut file, from, self.size, query.as_bytes(), true, match_case, whole_word)
+        } else {
+            find_bytes(&mut file, 0, from, query.as_bytes(), false, match_case, whole_word)
+        }
     }
 
     pub fn show(
@@ -254,6 +282,67 @@ impl LargeView {
         self.prepared_for = None;
         self.ensure_window(rows, wrap_cols)
     }
+}
+
+fn find_bytes(
+    file: &mut File,
+    start: u64,
+    end: u64,
+    needle: &[u8],
+    backwards: bool,
+    match_case: bool,
+    whole_word: bool,
+) -> Result<Option<u64>, FileError> {
+    // `start..end` bounds candidate start positions. A match may extend past
+    // `end`; this matters for overlapping "Find previous" results.
+    if needle.is_empty() || start >= end {
+        return Ok(None);
+    }
+    let mut cursor = start;
+    let mut last = None;
+    while cursor < end {
+        let before = usize::from(cursor > 0);
+        let read_start = cursor.saturating_sub(before as u64);
+        let candidates = ((end - cursor) as usize).min(CHUNK);
+        let wanted = before + candidates + needle.len();
+        file.seek(SeekFrom::Start(read_start)).map_err(FileError::Read)?;
+        let mut bytes = vec![0; wanted];
+        let count = file.read(&mut bytes).map_err(FileError::Read)?;
+        bytes.truncate(count);
+        for relative in 0..candidates {
+            let index = before + relative;
+            if index + needle.len() > bytes.len() {
+                break;
+            }
+            let candidate = &bytes[index..index + needle.len()];
+            let equal = if match_case {
+                candidate == needle
+            } else {
+                candidate.iter().zip(needle).all(|(a, b)| a.eq_ignore_ascii_case(b))
+            };
+            if !equal {
+                continue;
+            }
+            if whole_word {
+                let left = index.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+                let right = bytes.get(index + needle.len()).copied();
+                if left.is_some_and(word_byte) || right.is_some_and(word_byte) {
+                    continue;
+                }
+            }
+            let found = cursor + relative as u64;
+            if !backwards {
+                return Ok(Some(found));
+            }
+            last = Some(found);
+        }
+        cursor = cursor.saturating_add(candidates as u64);
+    }
+    Ok(last)
+}
+
+fn word_byte(byte: u8) -> bool {
+    byte >= 0x80 || byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn wrap_columns(ui: &egui::Ui, text_w: f32) -> usize {
@@ -729,6 +818,43 @@ mod tests {
         assert_eq!(view.offset, (wrap * 2) as u64);
         assert_ne!(view.window, first);
         assert_eq!(view.window.as_bytes()[0], data[wrap * 2]);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_search_crosses_chunks_and_wraps() {
+        let path = temp("search.txt");
+        let mut data = vec![b'x'; CHUNK - 2];
+        data.extend_from_slice(b" Needle tail needle");
+        write_all(&path, &data);
+        let view = LargeView::open(&path, data.len() as u64).unwrap();
+        assert_eq!(
+            view.find_from("needle", 0, false, false, false).unwrap(),
+            Some((CHUNK - 1) as u64)
+        );
+        assert_eq!(
+            view.find_from("Needle", data.len() as u64, false, true, false).unwrap(),
+            Some((CHUNK - 1) as u64)
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_search_honors_whole_words_and_direction() {
+        let path = temp("search-words.txt");
+        write_all(&path, b"log catalog log_tail log");
+        let view = LargeView::open(&path, 24).unwrap();
+        assert_eq!(view.find_from("log", 1, false, true, true).unwrap(), Some(21));
+        assert_eq!(view.find_from("log", 20, true, true, true).unwrap(), Some(0));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_search_previous_keeps_overlapping_matches() {
+        let path = temp("search-overlap.txt");
+        write_all(&path, b"aaa");
+        let view = LargeView::open(&path, 3).unwrap();
+        assert_eq!(view.find_from("aa", 1, true, true, false).unwrap(), Some(0));
         let _ = fs::remove_file(path);
     }
 

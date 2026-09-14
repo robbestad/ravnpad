@@ -1329,6 +1329,7 @@ impl eframe::App for RavnPad {
 
         let t = self.t();
         let recent_files = self.prefs.recent.clone();
+        let recent_labels = prefs::recent_labels(&recent_files);
         if !self.recovery_candidates.is_empty() {
             let labels = self.prefs.lang.io_text();
             let mut restore = None;
@@ -1375,11 +1376,7 @@ impl eframe::App for RavnPad {
                     }
                     ui.add_enabled_ui(!recent_files.is_empty(), |ui| {
                         ui.menu_button(t.recent_files, |ui| {
-                            for path in &recent_files {
-                                let label = path
-                                    .file_name()
-                                    .map(|name| name.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| path.display().to_string());
+                            for (path, label) in recent_files.iter().zip(&recent_labels) {
                                 if ui
                                     .button(label)
                                     .on_hover_text(path.display().to_string())

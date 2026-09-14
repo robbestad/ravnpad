@@ -78,6 +78,32 @@ impl Lang {
         }
     }
 
+    pub fn native_label(self, id: i32) -> Option<&'static str> {
+        let index = match id {
+            24..=32 => (id - 24) as usize,
+            35..=43 => (id - 35 + 9) as usize,
+            _ => return None,
+        };
+        let labels: &[&str] = match self {
+            Self::English => &["Edit", "Undo", "Redo", "Cut", "Copy", "Paste", "Select All", "Next", "Previous", "Open Recent", "Close", "Window", "Minimize", "Zoom", "Hide RavnPad", "Hide Others", "Show All", "Services"],
+            Self::Bokmal => &["Rediger", "Angre", "Gjør om", "Klipp ut", "Kopier", "Lim inn", "Marker alt", "Neste", "Forrige", "Åpne nylige", "Lukk", "Vindu", "Minimer", "Zoom", "Skjul RavnPad", "Skjul andre", "Vis alle", "Tjenester"],
+            Self::Nynorsk => &["Rediger", "Angre", "Gjer om", "Klipp ut", "Kopier", "Lim inn", "Merk alt", "Neste", "Førre", "Opne nylege", "Lukk", "Vindauge", "Minimer", "Zoom", "Gøym RavnPad", "Gøym andre", "Vis alle", "Tenester"],
+            Self::Swedish => &["Redigera", "Ångra", "Gör om", "Klipp ut", "Kopiera", "Klistra in", "Markera allt", "Nästa", "Föregående", "Öppna senaste", "Stäng", "Fönster", "Minimera", "Zooma", "Göm RavnPad", "Göm övriga", "Visa alla", "Tjänster"],
+            Self::Danish => &["Rediger", "Fortryd", "Gentag", "Klip", "Kopiér", "Sæt ind", "Vælg alt", "Næste", "Forrige", "Åbn seneste", "Luk", "Vindue", "Minimer", "Zoom", "Skjul RavnPad", "Skjul andre", "Vis alle", "Tjenester"],
+            Self::German => &["Bearbeiten", "Rückgängig", "Wiederholen", "Ausschneiden", "Kopieren", "Einfügen", "Alles auswählen", "Nächstes", "Vorheriges", "Zuletzt benutzt öffnen", "Schließen", "Fenster", "Minimieren", "Zoomen", "RavnPad ausblenden", "Andere ausblenden", "Alle einblenden", "Dienste"],
+            Self::Dutch => &["Bewerken", "Ongedaan maken", "Opnieuw", "Knippen", "Kopiëren", "Plakken", "Alles selecteren", "Volgende", "Vorige", "Recent openen", "Sluiten", "Venster", "Minimaliseren", "Zoomen", "RavnPad verbergen", "Andere verbergen", "Alles tonen", "Voorzieningen"],
+            Self::French => &["Édition", "Annuler", "Rétablir", "Couper", "Copier", "Coller", "Tout sélectionner", "Suivant", "Précédent", "Ouvrir l’élément récent", "Fermer", "Fenêtre", "Réduire", "Zoom", "Masquer RavnPad", "Masquer les autres", "Tout afficher", "Services"],
+            Self::Spanish => &["Edición", "Deshacer", "Rehacer", "Cortar", "Copiar", "Pegar", "Seleccionar todo", "Siguiente", "Anterior", "Abrir reciente", "Cerrar", "Ventana", "Minimizar", "Zoom", "Ocultar RavnPad", "Ocultar otros", "Mostrar todo", "Servicios"],
+            Self::Italian => &["Modifica", "Annulla", "Ripristina", "Taglia", "Copia", "Incolla", "Seleziona tutto", "Successivo", "Precedente", "Apri recenti", "Chiudi", "Finestra", "Riduci a icona", "Zoom", "Nascondi RavnPad", "Nascondi altre", "Mostra tutte", "Servizi"],
+            Self::Portuguese => &["Editar", "Desfazer", "Refazer", "Cortar", "Copiar", "Colar", "Selecionar tudo", "Seguinte", "Anterior", "Abrir recente", "Fechar", "Janela", "Minimizar", "Zoom", "Ocultar RavnPad", "Ocultar outras", "Mostrar tudo", "Serviços"],
+            Self::Finnish => &["Muokkaa", "Kumoa", "Tee uudelleen", "Leikkaa", "Kopioi", "Sijoita", "Valitse kaikki", "Seuraava", "Edellinen", "Avaa äskeinen", "Sulje", "Ikkuna", "Pienennä", "Zoomaa", "Kätke RavnPad", "Kätke muut", "Näytä kaikki", "Palvelut"],
+            Self::Polish => &["Edycja", "Cofnij", "Ponów", "Wytnij", "Kopiuj", "Wklej", "Zaznacz wszystko", "Następny", "Poprzedni", "Otwórz ostatnie", "Zamknij", "Okno", "Minimalizuj", "Powiększ", "Ukryj RavnPad", "Ukryj pozostałe", "Pokaż wszystkie", "Usługi"],
+            Self::Icelandic => &["Breyta", "Afturkalla", "Endurtaka", "Klippa", "Afrita", "Líma", "Velja allt", "Næsta", "Fyrra", "Opna nýlegt", "Loka", "Gluggi", "Lágmarka", "Stækka", "Fela RavnPad", "Fela önnur", "Sýna allt", "Þjónustur"],
+            Self::Czech => &["Úpravy", "Zpět", "Znovu", "Vyjmout", "Kopírovat", "Vložit", "Vybrat vše", "Další", "Předchozí", "Otevřít poslední", "Zavřít", "Okno", "Minimalizovat", "Zvětšit", "Skrýt RavnPad", "Skrýt ostatní", "Zobrazit vše", "Služby"],
+        };
+        labels.get(index).copied()
+    }
+
     pub fn from_code(code: &str) -> Option<Self> {
         match code.trim().to_ascii_lowercase().as_str() {
             "en" => Some(Self::English),
@@ -163,6 +189,8 @@ pub struct UiText {
     pub ok: &'static str,
     pub drop_to_open: &'static str,
     pub find: &'static str,
+    pub no_matches: &'static str,
+    pub whole_word: &'static str,
     pub replace: &'static str,
     pub replace_all: &'static str,
     pub spellcheck: &'static str,
@@ -293,6 +321,8 @@ const EN: UiText = UiText {
     ok: "OK",
     drop_to_open: "Drop to open",
     find: "Find",
+    no_matches: "No matches found",
+    whole_word: "Whole word",
     replace: "Replace",
     replace_all: "Replace all",
     spellcheck: "Spell checking",
@@ -354,6 +384,8 @@ const NB: UiText = UiText {
     ok: "OK",
     drop_to_open: "Slipp for å åpne",
     find: "Søk",
+    no_matches: "Ingen treff",
+    whole_word: "Hele ord",
     replace: "Erstatt",
     replace_all: "Erstatt alle",
     spellcheck: "Stavekontroll",
@@ -415,6 +447,8 @@ const NN: UiText = UiText {
     ok: "OK",
     drop_to_open: "Slepp for å opne",
     find: "Søk",
+    no_matches: "Ingen treff",
+    whole_word: "Heile ord",
     replace: "Erstatt",
     replace_all: "Erstatt alle",
     spellcheck: "Stavekontroll",
@@ -476,6 +510,8 @@ const SV: UiText = UiText {
     ok: "OK",
     drop_to_open: "Släpp för att öppna",
     find: "Sök",
+    no_matches: "Inga träffar",
+    whole_word: "Hela ord",
     replace: "Ersätt",
     replace_all: "Ersätt alla",
     spellcheck: "Stavningskontroll",
@@ -537,6 +573,8 @@ const DA: UiText = UiText {
     ok: "OK",
     drop_to_open: "Slip for at åbne",
     find: "Søg",
+    no_matches: "Ingen resultater",
+    whole_word: "Hele ord",
     replace: "Erstat",
     replace_all: "Erstat alle",
     spellcheck: "Stavekontrol",
@@ -598,6 +636,8 @@ const DE: UiText = UiText {
     ok: "OK",
     drop_to_open: "Zum Öffnen ablegen",
     find: "Suchen",
+    no_matches: "Keine Treffer gefunden",
+    whole_word: "Ganzes Wort",
     replace: "Ersetzen",
     replace_all: "Alle ersetzen",
     spellcheck: "Rechtschreibprüfung",
@@ -659,6 +699,8 @@ const NL: UiText = UiText {
     ok: "OK",
     drop_to_open: "Sleep om te openen",
     find: "Zoeken",
+    no_matches: "Geen resultaten gevonden",
+    whole_word: "Heel woord",
     replace: "Vervangen",
     replace_all: "Alles vervangen",
     spellcheck: "Spellingscontrole",
@@ -720,6 +762,8 @@ const FR: UiText = UiText {
     ok: "OK",
     drop_to_open: "Déposer pour ouvrir",
     find: "Rechercher",
+    no_matches: "Aucun résultat",
+    whole_word: "Mot entier",
     replace: "Remplacer",
     replace_all: "Tout remplacer",
     spellcheck: "Vérification orthographique",
@@ -781,6 +825,8 @@ const ES: UiText = UiText {
     ok: "Aceptar",
     drop_to_open: "Suelte para abrir",
     find: "Buscar",
+    no_matches: "No se encontraron resultados",
+    whole_word: "Palabra completa",
     replace: "Reemplazar",
     replace_all: "Reemplazar todo",
     spellcheck: "Corrección ortográfica",
@@ -842,6 +888,8 @@ const IT: UiText = UiText {
     ok: "OK",
     drop_to_open: "Rilascia per aprire",
     find: "Cerca",
+    no_matches: "Nessun risultato",
+    whole_word: "Parola intera",
     replace: "Sostituisci",
     replace_all: "Sostituisci tutto",
     spellcheck: "Controllo ortografico",
@@ -903,6 +951,8 @@ const PT: UiText = UiText {
     ok: "OK",
     drop_to_open: "Largue para abrir",
     find: "Localizar",
+    no_matches: "Nenhum resultado encontrado",
+    whole_word: "Palavra inteira",
     replace: "Substituir",
     replace_all: "Substituir tudo",
     spellcheck: "Verificação ortográfica",
@@ -964,6 +1014,8 @@ const FI: UiText = UiText {
     ok: "OK",
     drop_to_open: "Avaa pudottamalla",
     find: "Etsi",
+    no_matches: "Ei osumia",
+    whole_word: "Koko sana",
     replace: "Korvaa",
     replace_all: "Korvaa kaikki",
     spellcheck: "Oikeinkirjoitustarkistus",
@@ -1025,6 +1077,8 @@ const PL: UiText = UiText {
     ok: "OK",
     drop_to_open: "Upuść, aby otworzyć",
     find: "Szukaj",
+    no_matches: "Brak wyników",
+    whole_word: "Całe słowo",
     replace: "Zamień",
     replace_all: "Zamień wszystko",
     spellcheck: "Sprawdzanie pisowni",
@@ -1086,6 +1140,8 @@ const IS: UiText = UiText {
     ok: "Í lagi",
     drop_to_open: "Slepptu til að opna",
     find: "Leita",
+    no_matches: "Engar niðurstöður",
+    whole_word: "Heilt orð",
     replace: "Skipta út",
     replace_all: "Skipta út öllu",
     spellcheck: "Stafsetningarathugun",
@@ -1147,6 +1203,8 @@ const CS: UiText = UiText {
     ok: "OK",
     drop_to_open: "Přetáhněte pro otevření",
     find: "Hledat",
+    no_matches: "Nebyly nalezeny žádné výsledky",
+    whole_word: "Celé slovo",
     replace: "Nahradit",
     replace_all: "Nahradit vše",
     spellcheck: "Kontrola pravopisu",
@@ -1203,6 +1261,20 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), Lang::ALL.len());
+    }
+
+    #[test]
+    fn every_language_has_all_native_menu_labels() {
+        let ids = (24..=32).chain(35..=43);
+        for lang in Lang::ALL {
+            for id in ids.clone() {
+                assert!(
+                    lang.native_label(id).is_some_and(|label| !label.is_empty()),
+                    "missing native label {id} for {}",
+                    lang.code()
+                );
+            }
+        }
     }
 }
 
