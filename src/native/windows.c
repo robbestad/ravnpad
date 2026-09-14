@@ -26,6 +26,7 @@ static wchar_t query[1024], replacement[1024], currentFont[LF_FACESIZE];
 static double currentSize;
 static int updating, busy, readonlyDocument, currentSpell, currentWrap=-1, currentTheme=-1, darkTheme, smokeTest, smokeResult, documentDirty;
 static int wheelRemainder;
+static LONG selectionAnchor=-1;
 static UINT dpi=96;
 
 static wchar_t *wide(const char *s) {
@@ -133,9 +134,80 @@ static void scroll_wheel(WPARAM value) {
         SendMessageW(editor,EM_LINESCROLL,0,-notches*(int)lines);
     }
 }
+static void command(int id);
+static int editor_command_enabled(int id) {
+    CHARRANGE selection={0};
+    SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&selection);
+    int hasSelection=selection.cpMin!=selection.cpMax;
+    switch(id) {
+        case RP_UNDO: return !readonlyDocument&&!busy&&SendMessageW(editor,EM_CANUNDO,0,0);
+        case RP_REDO: return !readonlyDocument&&!busy&&SendMessageW(editor,EM_CANREDO,0,0);
+        case RP_CUT: return hasSelection&&!readonlyDocument&&!busy;
+        case RP_COPY: return hasSelection;
+        case RP_PASTE: return !readonlyDocument&&!busy
+            &&(IsClipboardFormatAvailable(CF_UNICODETEXT)||IsClipboardFormatAvailable(CF_TEXT));
+        case RP_SELECT_ALL: return GetWindowTextLengthW(editor)>0;
+        default: return 0;
+    }
+}
+static void context_entry(HMENU popup,int id) {
+    wchar_t *label=wide(rp_label(id));
+    AppendMenuW(popup,MF_STRING|(editor_command_enabled(id)?MF_ENABLED:MF_GRAYED),id,label?label:L"");
+    free(label);
+}
+static void show_editor_context_menu(LPARAM coordinates) {
+    POINT point={0};
+    if((INT_PTR)coordinates==-1) {
+        if(!GetCaretPos(&point)) {
+            RECT rect={0}; GetClientRect(editor,&rect);
+            point.x=rect.left+MulDiv(24,dpi,96); point.y=rect.top+MulDiv(24,dpi,96);
+        }
+        ClientToScreen(editor,&point);
+    } else {
+        point.x=(short)LOWORD(coordinates); point.y=(short)HIWORD(coordinates);
+    }
+    HMENU popup=CreatePopupMenu();
+    if(!popup) return;
+    context_entry(popup,RP_UNDO); context_entry(popup,RP_REDO);
+    AppendMenuW(popup,MF_SEPARATOR,0,NULL);
+    context_entry(popup,RP_CUT); context_entry(popup,RP_COPY); context_entry(popup,RP_PASTE);
+    AppendMenuW(popup,MF_SEPARATOR,0,NULL); context_entry(popup,RP_SELECT_ALL);
+    SetForegroundWindow(window);
+    int selected=TrackPopupMenu(popup,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,window,NULL);
+    DestroyMenu(popup);
+    if(selected) command(selected);
+    PostMessageW(window,WM_NULL,0,0);
+}
+static LONG editor_character_at(LPARAM coordinates) {
+    POINTL point={(short)LOWORD(coordinates),(short)HIWORD(coordinates)};
+    LRESULT character=SendMessageW(editor,EM_CHARFROMPOS,0,(LPARAM)&point);
+    LONG length=GetWindowTextLengthW(editor);
+    if(character<0) return 0;
+    return character>length?length:(LONG)character;
+}
+static void extend_selection_to(LONG target) {
+    CHARRANGE selection={0};
+    SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&selection);
+    LONG anchor=selection.cpMin==selection.cpMax?selection.cpMin:selectionAnchor;
+    if(anchor<0) anchor=selection.cpMin;
+    // Rich Edit accepts a reversed range and keeps cpMax as the active end.
+    // Preserve that direction so keyboard extension and EM_SCROLLCARET continue
+    // from the point the user Shift-clicked, including backward selections.
+    CHARRANGE extended={anchor,target};
+    SetFocus(editor);
+    SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&extended);
+    SendMessageW(editor,EM_SCROLLCARET,0,0);
+    selectionAnchor=anchor;
+}
 static LRESULT CALLBACK editor_procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l,UINT_PTR id,DWORD_PTR data) {
     (void)data;
     if(message==WM_MOUSEWHEEL) { scroll_wheel(w); return 0; }
+    if(message==WM_CONTEXTMENU) { show_editor_context_menu(l); return 0; }
+    if(message==WM_LBUTTONDOWN) {
+        LONG target=editor_character_at(l);
+        if(w&MK_SHIFT) { extend_selection_to(target); return 0; }
+        selectionAnchor=target;
+    }
     if(message==WM_NCDESTROY) RemoveWindowSubclass(hwnd,editor_procedure,id);
     return DefSubclassProc(hwnd,message,w,l);
 }
@@ -311,6 +383,18 @@ void rp_run(void) {
                 &&formatRect.right<clientRect.right&&formatRect.bottom==clientRect.bottom;
             CHARRANGE mouseSelection={0,215};
             SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&mouseSelection);
+            valid=valid&&editor_command_enabled(RP_COPY)&&editor_command_enabled(RP_CUT)&&editor_command_enabled(RP_SELECT_ALL);
+            CHARRANGE caret={5,5}; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&caret); selectionAnchor=-1;
+            POINTL shiftPoint={0}; SendMessageW(editor,EM_POSFROMCHAR,(WPARAM)&shiftPoint,35);
+            SendMessageW(editor,WM_LBUTTONDOWN,MK_SHIFT,MAKELPARAM((short)shiftPoint.x,(short)shiftPoint.y));
+            CHARRANGE shifted={0}; SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&shifted);
+            valid=valid&&shifted.cpMin==5&&shifted.cpMax==35;
+            caret.cpMin=35; caret.cpMax=35; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&caret); selectionAnchor=-1;
+            SendMessageW(editor,EM_POSFROMCHAR,(WPARAM)&shiftPoint,5);
+            SendMessageW(editor,WM_LBUTTONDOWN,MK_SHIFT,MAKELPARAM((short)shiftPoint.x,(short)shiftPoint.y));
+            SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&shifted);
+            valid=valid&&shifted.cpMin==5&&shifted.cpMax==35;
+            SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&mouseSelection); selectionAnchor=mouseSelection.cpMin;
             SendMessageW(editor,WM_VSCROLL,SB_TOP,0);
             int firstBefore=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
             SCROLLINFO scrollBefore={0}; scrollBefore.cbSize=sizeof(scrollBefore); scrollBefore.fMask=SIF_ALL;
@@ -366,6 +450,7 @@ void rp_run(void) {
 }
 void rp_document(const char *value,size_t length,int readonly) {
     updating=1;
+    selectionAnchor=-1;
     int count=length<=INT_MAX?MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value,(int)length,NULL,0):0;
     wchar_t *w=calloc((size_t)count+1,sizeof(wchar_t));
     if(w && count) MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value,(int)length,w,count); if(w) { SETTEXTEX set={ST_DEFAULT,1200}; SendMessageW(editor,EM_SETTEXTEX,(WPARAM)&set,(LPARAM)w); free(w); }
