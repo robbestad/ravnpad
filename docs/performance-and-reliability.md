@@ -62,7 +62,8 @@ Egui already caches layout per paragraph, but a huge single paragraph still
 requires a full re-layout. Keeping typing consistently below 16 ms at 1–2 MB
 would require a separate editor layout/virtualization change with coverage for
 selection, wrapping, IME, undo and search navigation. The existing read-only
-viewer above 2 MiB still reads bounded windows synchronously when scrolling;
+viewer above 2 MiB on Linux (16 MiB in the native macOS and Windows builds)
+still reads bounded windows synchronously when scrolling;
 network-drive latency there is not addressed by the editable-file worker.
 
 Regression tests cover replacement failures, symlinks and permissions, external
