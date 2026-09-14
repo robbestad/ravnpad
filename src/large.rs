@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, TextStyle};
+use unicode_casefold::UnicodeCaseFold;
 
 /// Files larger than this are opened as a read-only windowed view.
 #[cfg(any(target_os = "macos", windows))]
@@ -110,7 +111,7 @@ impl LargeView {
         backwards: bool,
         match_case: bool,
         whole_word: bool,
-    ) -> Result<Option<u64>, FileError> {
+    ) -> Result<Option<(u64, usize)>, FileError> {
         if query.is_empty() || self.size == 0 {
             return Ok(None);
         }
@@ -295,19 +296,23 @@ fn find_bytes(
     backwards: bool,
     match_case: bool,
     whole_word: bool,
-) -> Result<Option<u64>, FileError> {
+) -> Result<Option<(u64, usize)>, FileError> {
     // `start..end` bounds candidate start positions. A match may extend past
     // `end`; this matters for overlapping "Find previous" results.
     if needle.is_empty() || start >= end {
         return Ok(None);
     }
+    let folded_needle = (!match_case).then(|| fold_case(needle));
     let mut cursor = start;
     let mut last = None;
     while cursor < end {
         let before = cursor.min(4) as usize;
         let read_start = cursor.saturating_sub(before as u64);
         let candidates = ((end - cursor) as usize).min(CHUNK);
-        let match_bytes = needle.chars().count().saturating_mul(4);
+        let match_chars = folded_needle
+            .as_ref()
+            .map_or_else(|| needle.chars().count(), Vec::len);
+        let match_bytes = match_chars.saturating_mul(4);
         let wanted = before
             .saturating_add(candidates)
             .saturating_add(match_bytes)
@@ -318,7 +323,7 @@ fn find_bytes(
         bytes.truncate(count);
         for relative in 0..candidates {
             let index = before + relative;
-            let Some(length) = match_at(&bytes, index, needle, match_case) else {
+            let Some(length) = match_at(&bytes, index, needle, folded_needle.as_deref()) else {
                 continue;
             };
             if whole_word {
@@ -330,23 +335,42 @@ fn find_bytes(
             }
             let found = cursor + relative as u64;
             if !backwards {
-                return Ok(Some(found));
+                return Ok(Some((found, length)));
             }
-            last = Some(found);
+            last = Some((found, length));
         }
         cursor = cursor.saturating_add(candidates as u64);
     }
     Ok(last)
 }
 
-fn match_at(bytes: &[u8], index: usize, needle: &str, match_case: bool) -> Option<usize> {
+fn match_at(
+    bytes: &[u8],
+    index: usize,
+    needle: &str,
+    folded_needle: Option<&[char]>,
+) -> Option<usize> {
     let mut at = index;
-    for expected in needle.chars() {
-        let (actual, width) = decode_valid_char(bytes, at)?;
-        if actual != expected && (match_case || !chars_equal_ignore_case(actual, expected)) {
-            return None;
+    if let Some(expected) = folded_needle {
+        let mut matched = 0;
+        while matched < expected.len() {
+            let (actual, width) = decode_valid_char(bytes, at)?;
+            for folded in fold_char(actual) {
+                if expected.get(matched) != Some(&folded) {
+                    return None;
+                }
+                matched += 1;
+            }
+            at += width;
         }
-        at += width;
+    } else {
+        for expected in needle.chars() {
+            let (actual, width) = decode_valid_char(bytes, at)?;
+            if actual != expected {
+                return None;
+            }
+            at += width;
+        }
     }
     Some(at - index)
 }
@@ -368,9 +392,12 @@ fn previous_char(bytes: &[u8], index: usize) -> Option<char> {
     })
 }
 
-fn chars_equal_ignore_case(left: char, right: char) -> bool {
-    left.to_lowercase().eq(right.to_lowercase())
-        || left.to_uppercase().eq(right.to_uppercase())
+fn fold_case(value: &str) -> Vec<char> {
+    value.case_fold().collect()
+}
+
+fn fold_char(ch: char) -> impl Iterator<Item = char> {
+    ch.case_fold()
 }
 
 fn word_char(ch: char) -> bool {
@@ -862,11 +889,11 @@ mod tests {
         let view = LargeView::open(&path, data.len() as u64).unwrap();
         assert_eq!(
             view.find_from("needle", 0, false, false, false).unwrap(),
-            Some((CHUNK - 1) as u64)
+            Some(((CHUNK - 1) as u64, 6))
         );
         assert_eq!(
             view.find_from("Needle", data.len() as u64, false, true, false).unwrap(),
-            Some((CHUNK - 1) as u64)
+            Some(((CHUNK - 1) as u64, 6))
         );
         let _ = fs::remove_file(path);
     }
@@ -876,8 +903,14 @@ mod tests {
         let path = temp("search-words.txt");
         write_all(&path, b"log catalog log_tail log");
         let view = LargeView::open(&path, 24).unwrap();
-        assert_eq!(view.find_from("log", 1, false, true, true).unwrap(), Some(21));
-        assert_eq!(view.find_from("log", 20, true, true, true).unwrap(), Some(0));
+        assert_eq!(
+            view.find_from("log", 1, false, true, true).unwrap(),
+            Some((21, 3))
+        );
+        assert_eq!(
+            view.find_from("log", 20, true, true, true).unwrap(),
+            Some((0, 3))
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -886,7 +919,10 @@ mod tests {
         let path = temp("search-overlap.txt");
         write_all(&path, b"aaa");
         let view = LargeView::open(&path, 3).unwrap();
-        assert_eq!(view.find_from("aa", 1, true, true, false).unwrap(), Some(0));
+        assert_eq!(
+            view.find_from("aa", 1, true, true, false).unwrap(),
+            Some((0, 2))
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -895,7 +931,31 @@ mod tests {
         let path = temp("search-unicode-case.txt");
         write_all(&path, "blåbær ÅNGSTRÖM".as_bytes());
         let view = LargeView::open(&path, 19).unwrap();
-        assert_eq!(view.find_from("ångström", 0, false, false, false).unwrap(), Some(9));
+        assert_eq!(
+            view.find_from("ångström", 0, false, false, false).unwrap(),
+            Some((9, 10))
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_search_supports_multi_character_unicode_case_folds() {
+        let path = temp("search-unicode-fold.txt");
+        let text = "STRASSE straße";
+        write_all(&path, text.as_bytes());
+        let view = LargeView::open(&path, text.len() as u64).unwrap();
+        assert_eq!(
+            view.find_from("straße", 0, false, false, true).unwrap(),
+            Some((0, 7))
+        );
+        assert_eq!(
+            view.find_from("STRASSE", 1, false, false, true).unwrap(),
+            Some((8, 7))
+        );
+        assert_eq!(
+            view.find_from("straße", 0, false, true, true).unwrap(),
+            Some((8, 7))
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -905,7 +965,10 @@ mod tests {
         let text = "ord—foo—bar";
         write_all(&path, text.as_bytes());
         let view = LargeView::open(&path, text.len() as u64).unwrap();
-        assert_eq!(view.find_from("foo", 0, false, true, true).unwrap(), Some(6));
+        assert_eq!(
+            view.find_from("foo", 0, false, true, true).unwrap(),
+            Some((6, 3))
+        );
         let _ = fs::remove_file(path);
     }
 

@@ -382,11 +382,23 @@ impl Native {
                         self.viewer_busy = true;
                         let tx = self.search_tx.clone();
                         thread::spawn(move || {
-                            let outcome = match view.find_from(&query, from, backwards, match_case, whole_word) {
-                                Ok(Some(position)) => {
+                            let outcome = match view.find_from(
+                                &query,
+                                from,
+                                backwards,
+                                match_case,
+                                whole_word,
+                            ) {
+                                Ok(Some((position, byte_length))) => {
                                     view.set_offset(position);
                                     match view.native_window(None) {
-                                        Ok(text) => SearchOutcome::Found { text, position, length: query.encode_utf16().count() },
+                                        Ok(text) => {
+                                            let length = text
+                                                .get(..byte_length)
+                                                .map(|matched| matched.encode_utf16().count())
+                                                .unwrap_or_else(|| query.encode_utf16().count());
+                                            SearchOutcome::Found { text, position, length }
+                                        }
                                         Err(error) => SearchOutcome::Failed(error),
                                     }
                                 }
