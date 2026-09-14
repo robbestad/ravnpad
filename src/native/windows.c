@@ -441,3 +441,18 @@ int rp_smoke_test(void) { smokeTest=1; smokeResult=1; rp_run(); return smokeResu
 void rp_lock(void) { busy=1; SendMessageW(editor,EM_SETREADONLY,TRUE,0); }
 
 void rp_cancel_close(void) {}
+
+int rp_confirm(const char *title,const char *body,const char *accept,const char *discard,const char *cancel) {
+    wchar_t *wideTitle=wide(title), *wideBody=wide(body), *wideAccept=wide(accept), *wideDiscard=wide(discard), *wideCancel=wide(cancel);
+    enum { CONFIRM_ACCEPT=1001, CONFIRM_DISCARD=1002 };
+    TASKDIALOG_BUTTON buttons[]={{CONFIRM_ACCEPT,wideAccept},{CONFIRM_DISCARD,wideDiscard},{IDCANCEL,wideCancel}};
+    TASKDIALOGCONFIG config={0}; config.cbSize=sizeof(config); config.hwndParent=window;
+    config.dwFlags=TDF_POSITION_RELATIVE_TO_WINDOW|TDF_SIZE_TO_CONTENT;
+    config.pszWindowTitle=L"RavnPad"; config.pszMainInstruction=wideTitle; config.pszContent=wideBody;
+    config.pszMainIcon=TD_WARNING_ICON; config.cButtons=3; config.pButtons=buttons; config.nDefaultButton=CONFIRM_ACCEPT;
+    int selected=IDCANCEL;
+    HRESULT result=TaskDialogIndirect(&config,&selected,NULL,NULL);
+    free(wideTitle); free(wideBody); free(wideAccept); free(wideDiscard); free(wideCancel);
+    if(FAILED(result)) return 0;
+    return selected==CONFIRM_ACCEPT?1:selected==CONFIRM_DISCARD?2:0;
+}
