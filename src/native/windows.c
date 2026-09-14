@@ -25,6 +25,7 @@ static DWORD findOptions=FR_DOWN;
 static wchar_t query[1024], replacement[1024], currentFont[LF_FACESIZE];
 static double currentSize;
 static int updating, busy, readonlyDocument, currentSpell, currentWrap=-1, currentTheme=-1, darkTheme, smokeTest, smokeResult, documentDirty;
+static int wheelRemainder;
 static UINT dpi=96;
 
 static wchar_t *wide(const char *s) {
@@ -118,6 +119,26 @@ static void resize(void) {
     textRect.left+=margin; textRect.right-=margin; textRect.top+=margin;
     SendMessageW(editor,EM_SETRECT,0,(LPARAM)&textRect);
 }
+static void scroll_wheel(WPARAM value) {
+    UINT lines=3;
+    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES,0,&lines,0);
+    wheelRemainder+=(short)HIWORD(value);
+    int notches=wheelRemainder/WHEEL_DELTA;
+    wheelRemainder-=notches*WHEEL_DELTA;
+    if(!notches) return;
+    if(lines==WHEEL_PAGESCROLL) {
+        UINT action=notches>0?SB_PAGEUP:SB_PAGEDOWN;
+        for(int i=0;i<abs(notches);i++) SendMessageW(editor,EM_SCROLL,action,0);
+    } else {
+        SendMessageW(editor,EM_LINESCROLL,0,-notches*(int)lines);
+    }
+}
+static LRESULT CALLBACK editor_procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l,UINT_PTR id,DWORD_PTR data) {
+    (void)data;
+    if(message==WM_MOUSEWHEEL) { scroll_wheel(w); return 0; }
+    if(message==WM_NCDESTROY) RemoveWindowSubclass(hwnd,editor_procedure,id);
+    return DefSubclassProc(hwnd,message,w,l);
+}
 static void choose_font(void) {
     LOGFONTW lf={0}; if(font) GetObjectW(font,sizeof(lf),&lf);
     CHOOSEFONTW choice={0}; choice.lStructSize=sizeof(choice); choice.hwndOwner=window;
@@ -199,6 +220,7 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
             window=hwnd; dpi=GetDpiForWindow(hwnd);
             editor=CreateWindowExW(0,MSFTEDIT_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_WANTRETURN|ES_NOHIDESEL,0,0,0,0,hwnd,(HMENU)1,GetModuleHandleW(NULL),NULL);
             if(!editor) return -1;
+            SetWindowSubclass(editor,editor_procedure,1,0);
             SendMessageW(editor,EM_SETTEXTMODE,TM_PLAINTEXT|TM_MULTILEVELUNDO,0);
             SendMessageW(editor,EM_EXLIMITTEXT,0,0x7ffffffe);
             SendMessageW(editor,EM_SETEVENTMASK,0,ENM_CHANGE);
@@ -224,6 +246,7 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
             if((HWND)l==status&&themeBrush) { SetTextColor((HDC)w,darkTheme?RGB(220,220,220):GetSysColor(COLOR_BTNTEXT)); SetBkColor((HDC)w,darkTheme?RGB(32,32,32):GetSysColor(COLOR_BTNFACE)); return (LRESULT)themeBrush; }
             break;
         case WM_TIMER: rp_tick(); return 0;
+        case WM_MOUSEWHEEL: scroll_wheel(w); return 0;
         case WM_HSCROLL: if((HWND)l==position&&LOWORD(w)==TB_ENDTRACK) rp_view(SendMessageW(position,TBM_GETPOS,0,0)/1000.0); return 0;
         case WM_COMMAND:
             if((HWND)l==editor&&HIWORD(w)==EN_CHANGE) { if(!updating) { documentDirty=1; rp_changed(); } }
@@ -286,6 +309,33 @@ void rp_run(void) {
             GetClientRect(editor,&clientRect); SendMessageW(editor,EM_GETRECT,0,(LPARAM)&formatRect);
             valid=valid&&formatRect.top>clientRect.top&&formatRect.left>clientRect.left
                 &&formatRect.right<clientRect.right&&formatRect.bottom==clientRect.bottom;
+            CHARRANGE mouseSelection={0,215};
+            SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&mouseSelection);
+            SendMessageW(editor,WM_VSCROLL,SB_TOP,0);
+            int firstBefore=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
+            SCROLLINFO scrollBefore={0}; scrollBefore.cbSize=sizeof(scrollBefore); scrollBefore.fMask=SIF_ALL;
+            GetScrollInfo(editor,SB_VERT,&scrollBefore);
+            SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-WHEEL_DELTA),0);
+            int firstAfter=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
+            SCROLLINFO scrollAfter={0}; scrollAfter.cbSize=sizeof(scrollAfter); scrollAfter.fMask=SIF_ALL;
+            GetScrollInfo(editor,SB_VERT,&scrollAfter);
+            CHARRANGE selectionAfterWheel={0};
+            SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&selectionAfterWheel);
+            int interactionValid=mouseSelection.cpMax>mouseSelection.cpMin
+                &&firstAfter>firstBefore
+                &&selectionAfterWheel.cpMin==mouseSelection.cpMin
+                &&selectionAfterWheel.cpMax==mouseSelection.cpMax;
+            if(!interactionValid) fprintf(stderr,"Mouse/scroll smoke: selection %ld..%ld -> %ld..%ld, first line %d -> %d, scroll %d/%d/%u -> %d/%d/%u\n",
+                mouseSelection.cpMin,mouseSelection.cpMax,selectionAfterWheel.cpMin,selectionAfterWheel.cpMax,firstBefore,firstAfter,
+                scrollBefore.nPos,scrollBefore.nMax,scrollBefore.nPage,scrollAfter.nPos,scrollAfter.nMax,scrollAfter.nPage);
+            valid=valid&&interactionValid;
+            SendMessageW(editor,WM_VSCROLL,SB_TOP,0);
+            wheelRemainder=0;
+            SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-(WHEEL_DELTA/2)),0);
+            int firstAfterHalf=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
+            SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-(WHEEL_DELTA/2)),0);
+            int firstAfterFull=(int)SendMessageW(editor,EM_GETFIRSTVISIBLELINE,0,0);
+            valid=valid&&firstAfterHalf==0&&firstAfterFull>0;
             SendMessageW(editor,WM_VSCROLL,SB_PAGEDOWN,0);
             SendMessageW(editor,WM_MOUSEWHEEL,MAKEWPARAM(0,(WORD)-WHEEL_DELTA),0);
             SendMessageW(editor,WM_VSCROLL,SB_BOTTOM,0);
