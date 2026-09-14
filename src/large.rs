@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, TextStyle};
 
 /// Files larger than this are opened as a read-only windowed view.
+#[cfg(any(target_os = "macos", windows))]
 pub const EDIT_LIMIT: u64 = 16 * 1024 * 1024;
+#[cfg(not(any(target_os = "macos", windows)))]
+pub const EDIT_LIMIT: u64 = 2 * 1024 * 1024;
 
 const LOOKBACK: u64 = 256 * 1024;
 const MAX_WINDOW: usize = 256 * 1024;
@@ -114,17 +117,17 @@ impl LargeView {
         let mut file = File::open(&self.path).map_err(FileError::Read)?;
         let from = from.min(self.size);
         let first = if backwards {
-            find_bytes(&mut file, 0, from, query.as_bytes(), true, match_case, whole_word)?
+            find_bytes(&mut file, 0, from, query, true, match_case, whole_word)?
         } else {
-            find_bytes(&mut file, from, self.size, query.as_bytes(), false, match_case, whole_word)?
+            find_bytes(&mut file, from, self.size, query, false, match_case, whole_word)?
         };
         if first.is_some() {
             return Ok(first);
         }
         if backwards {
-            find_bytes(&mut file, from, self.size, query.as_bytes(), true, match_case, whole_word)
+            find_bytes(&mut file, from, self.size, query, true, match_case, whole_word)
         } else {
-            find_bytes(&mut file, 0, from, query.as_bytes(), false, match_case, whole_word)
+            find_bytes(&mut file, 0, from, query, false, match_case, whole_word)
         }
     }
 
@@ -288,7 +291,7 @@ fn find_bytes(
     file: &mut File,
     start: u64,
     end: u64,
-    needle: &[u8],
+    needle: &str,
     backwards: bool,
     match_case: bool,
     whole_word: bool,
@@ -301,32 +304,27 @@ fn find_bytes(
     let mut cursor = start;
     let mut last = None;
     while cursor < end {
-        let before = usize::from(cursor > 0);
+        let before = cursor.min(4) as usize;
         let read_start = cursor.saturating_sub(before as u64);
         let candidates = ((end - cursor) as usize).min(CHUNK);
-        let wanted = before + candidates + needle.len();
+        let match_bytes = needle.chars().count().saturating_mul(4);
+        let wanted = before
+            .saturating_add(candidates)
+            .saturating_add(match_bytes)
+            .saturating_add(4);
         file.seek(SeekFrom::Start(read_start)).map_err(FileError::Read)?;
         let mut bytes = vec![0; wanted];
         let count = file.read(&mut bytes).map_err(FileError::Read)?;
         bytes.truncate(count);
         for relative in 0..candidates {
             let index = before + relative;
-            if index + needle.len() > bytes.len() {
-                break;
-            }
-            let candidate = &bytes[index..index + needle.len()];
-            let equal = if match_case {
-                candidate == needle
-            } else {
-                candidate.iter().zip(needle).all(|(a, b)| a.eq_ignore_ascii_case(b))
-            };
-            if !equal {
+            let Some(length) = match_at(&bytes, index, needle, match_case) else {
                 continue;
-            }
+            };
             if whole_word {
-                let left = index.checked_sub(1).and_then(|i| bytes.get(i)).copied();
-                let right = bytes.get(index + needle.len()).copied();
-                if left.is_some_and(word_byte) || right.is_some_and(word_byte) {
+                let left = previous_char(&bytes, index);
+                let right = decode_char(&bytes, index + length).map(|(ch, _)| ch);
+                if left.is_some_and(word_char) || right.is_some_and(word_char) {
                     continue;
                 }
             }
@@ -341,8 +339,42 @@ fn find_bytes(
     Ok(last)
 }
 
-fn word_byte(byte: u8) -> bool {
-    byte >= 0x80 || byte.is_ascii_alphanumeric() || byte == b'_'
+fn match_at(bytes: &[u8], index: usize, needle: &str, match_case: bool) -> Option<usize> {
+    let mut at = index;
+    for expected in needle.chars() {
+        let (actual, width) = decode_valid_char(bytes, at)?;
+        if actual != expected && (match_case || !chars_equal_ignore_case(actual, expected)) {
+            return None;
+        }
+        at += width;
+    }
+    Some(at - index)
+}
+
+fn decode_valid_char(bytes: &[u8], index: usize) -> Option<(char, usize)> {
+    let width = utf8_width(*bytes.get(index)?);
+    if width == 0 || index + width > bytes.len() {
+        return None;
+    }
+    let value = std::str::from_utf8(&bytes[index..index + width]).ok()?;
+    Some((value.chars().next()?, width))
+}
+
+fn previous_char(bytes: &[u8], index: usize) -> Option<char> {
+    let floor = index.saturating_sub(4);
+    (floor..index).rev().find_map(|start| {
+        let (ch, width) = decode_valid_char(bytes, start)?;
+        (start + width == index).then_some(ch)
+    })
+}
+
+fn chars_equal_ignore_case(left: char, right: char) -> bool {
+    left.to_lowercase().eq(right.to_lowercase())
+        || left.to_uppercase().eq(right.to_uppercase())
+}
+
+fn word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 fn wrap_columns(ui: &egui::Ui, text_w: f32) -> usize {
@@ -855,6 +887,25 @@ mod tests {
         write_all(&path, b"aaa");
         let view = LargeView::open(&path, 3).unwrap();
         assert_eq!(view.find_from("aa", 1, true, true, false).unwrap(), Some(0));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_search_is_unicode_case_insensitive() {
+        let path = temp("search-unicode-case.txt");
+        write_all(&path, "blåbær ÅNGSTRÖM".as_bytes());
+        let view = LargeView::open(&path, 19).unwrap();
+        assert_eq!(view.find_from("ångström", 0, false, false, false).unwrap(), Some(9));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_search_treats_unicode_punctuation_as_a_word_boundary() {
+        let path = temp("search-unicode-boundary.txt");
+        let text = "ord—foo—bar";
+        write_all(&path, text.as_bytes());
+        let view = LargeView::open(&path, text.len() as u64).unwrap();
+        assert_eq!(view.find_from("foo", 0, false, true, true).unwrap(), Some(6));
         let _ = fs::remove_file(path);
     }
 
