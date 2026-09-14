@@ -197,7 +197,7 @@ static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM w,LPARAM l) {
     switch(message) {
         case WM_CREATE: {
             window=hwnd; dpi=GetDpiForWindow(hwnd);
-            editor=CreateWindowExW(0,MSFTEDIT_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_WANTRETURN,0,0,0,0,hwnd,(HMENU)1,GetModuleHandleW(NULL),NULL);
+            editor=CreateWindowExW(0,MSFTEDIT_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_WANTRETURN|ES_NOHIDESEL,0,0,0,0,hwnd,(HMENU)1,GetModuleHandleW(NULL),NULL);
             if(!editor) return -1;
             SendMessageW(editor,EM_SETTEXTMODE,TM_PLAINTEXT|TM_MULTILEVELUNDO,0);
             SendMessageW(editor,EM_EXLIMITTEXT,0,0x7ffffffe);
@@ -262,6 +262,7 @@ void rp_run(void) {
         rp_document(sample,strlen(sample),0);
         size_t length=0; char *copy=rp_copy_text(&length);
         int valid=copy && length==strlen(sample) && memcmp(copy,sample,length)==0; rp_free_text(copy);
+        valid=valid&&((GetWindowLongPtrW(editor,GWL_STYLE)&ES_NOHIDESEL)!=0);
         CHARRANGE end={-1,-1}; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&end);
         SendMessageW(editor,EM_REPLACESEL,TRUE,(LPARAM)L"!");
         valid=valid && SendMessageW(editor,EM_CANUNDO,0,0);
