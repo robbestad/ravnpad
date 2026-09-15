@@ -144,6 +144,34 @@ impl Document {
         }
     }
 
+    /// Build an incomplete read response from only the requested text range.
+    ///
+    /// Partial reads cannot be used as proposal bases, so they deliberately do
+    /// not hash a saved baseline or advertise the `propose` capability.
+    pub fn ranged_snapshot(
+        &self,
+        text: &str,
+        dirty: bool,
+        external_state: ExternalState,
+        read_only: bool,
+    ) -> Snapshot {
+        Snapshot {
+            protocol_version: PROTOCOL_VERSION,
+            instance_id: self.identity.instance_id.clone(),
+            document_id: self.identity.document_id.clone(),
+            revision: self.identity.revision,
+            buffer_hash: hash(text),
+            saved_baseline_hash: None,
+            dirty,
+            external_state,
+            read_only,
+            content_complete: false,
+            range_unit: RANGE_UNIT,
+            capabilities: vec!["read"],
+            text: text.to_owned(),
+        }
+    }
+
     #[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
     pub fn propose(&mut self, patch: Patch, current_text: &str) -> Result<&Proposal, Error> {
         self.propose_with_normalization(patch, current_text, None)
@@ -949,6 +977,18 @@ mod tests {
         assert!(document.proposals.values().all(|stored| {
             stored.proposal.before.is_empty() && stored.proposal.after.is_empty()
         }));
+    }
+
+    #[test]
+    fn ranged_snapshot_only_describes_the_requested_text() {
+        let document = Document::new("prefix-requested-suffix", usize::MAX);
+        let snapshot = document.ranged_snapshot("requested", true, ExternalState::Unknown, false);
+
+        assert_eq!(snapshot.text, "requested");
+        assert_eq!(snapshot.buffer_hash, hash("requested"));
+        assert_eq!(snapshot.saved_baseline_hash, None);
+        assert!(!snapshot.content_complete);
+        assert_eq!(snapshot.capabilities, vec!["read"]);
     }
 
     #[test]

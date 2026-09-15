@@ -452,6 +452,8 @@ const PIPE_READMODE_MESSAGE: u32 = 2;
 const PIPE_REJECT_REMOTE_CLIENTS: u32 = 8;
 #[cfg(windows)]
 const ERROR_PIPE_CONNECTED: i32 = 535;
+#[cfg(windows)]
+const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 
 #[cfg(windows)]
 struct PreparedListener {
@@ -504,7 +506,7 @@ fn create_named_pipe(
             name.as_ptr(),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
-            1,
+            PIPE_UNLIMITED_INSTANCES,
             MAX_MESSAGE as u32,
             MAX_MESSAGE as u32,
             5_000,
@@ -632,39 +634,59 @@ fn listen(
         let connected = unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) } != 0
             || io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED);
         if connected {
-            let mut bytes = vec![0_u8; MAX_MESSAGE + 1];
-            let mut read = 0;
-            if unsafe {
-                ReadFile(
-                    pipe,
-                    bytes.as_mut_ptr(),
-                    bytes.len() as u32,
-                    &mut read,
-                    std::ptr::null_mut(),
-                )
-            } != 0
-            {
-                bytes.truncate(read as usize);
-                let response = dispatch(&bytes, &tx, &ctx);
-                if let Ok(encoded) = serde_json::to_vec(&response) {
-                    let mut written = 0;
-                    unsafe {
-                        WriteFile(
-                            pipe,
-                            encoded.as_ptr(),
-                            encoded.len() as u32,
-                            &mut written,
-                            std::ptr::null_mut(),
-                        );
-                        FlushFileBuffers(pipe);
-                    }
-                }
+            let client_tx = tx.clone();
+            let client_ctx = ctx.clone();
+            // A connected client owns this pipe instance. Isolating its
+            // blocking read keeps the accept loop available to later clients.
+            let pipe_address = pipe as usize;
+            std::thread::spawn(move || {
+                handle_windows_client(pipe_address as WindowsHandle, &client_tx, &client_ctx)
+            });
+        } else {
+            unsafe {
+                CloseHandle(pipe);
             }
         }
-        unsafe {
-            DisconnectNamedPipe(pipe);
-            CloseHandle(pipe);
+    }
+}
+
+#[cfg(windows)]
+fn handle_windows_client(
+    pipe: WindowsHandle,
+    tx: &Sender<HostRequest>,
+    ctx: &eframe::egui::Context,
+) {
+    let mut bytes = vec![0_u8; MAX_MESSAGE + 1];
+    let mut read = 0;
+    if unsafe {
+        ReadFile(
+            pipe,
+            bytes.as_mut_ptr(),
+            bytes.len() as u32,
+            &mut read,
+            std::ptr::null_mut(),
+        )
+    } != 0
+    {
+        bytes.truncate(read as usize);
+        let response = dispatch(&bytes, tx, ctx);
+        if let Ok(encoded) = serde_json::to_vec(&response) {
+            let mut written = 0;
+            unsafe {
+                WriteFile(
+                    pipe,
+                    encoded.as_ptr(),
+                    encoded.len() as u32,
+                    &mut written,
+                    std::ptr::null_mut(),
+                );
+                FlushFileBuffers(pipe);
+            }
         }
+    }
+    unsafe {
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
     }
 }
 
@@ -787,6 +809,10 @@ mod tests {
         );
         let listener = prepare_listener(&address).unwrap();
         assert!(!listener.pipe.is_null());
+        let second = create_named_pipe(&address, listener.descriptor).unwrap();
+        unsafe {
+            CloseHandle(second);
+        }
     }
 
     #[cfg(windows)]

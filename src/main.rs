@@ -730,22 +730,25 @@ impl RavnPad {
                         continue;
                     }
                     let complete = start == 0 && end == self.text.len();
-                    let mut snapshot = self.document.snapshot(
-                        &self.text,
-                        self.path.as_ref().map(|_| self.saved_text.as_str()),
-                        self.is_dirty(),
-                        document::ExternalState::Unknown,
-                        self.large.is_some() || self.text.contains('\0'),
-                        complete,
-                        true,
-                    );
-                    if !complete {
-                        snapshot.text = self.text[start..end].to_owned();
-                        snapshot.buffer_hash = document::hash(&snapshot.text);
-                        snapshot
-                            .capabilities
-                            .retain(|capability| *capability != "propose");
-                    }
+                    let read_only = self.large.is_some() || self.text.contains('\0');
+                    let snapshot = if complete {
+                        self.document.snapshot(
+                            &self.text,
+                            self.path.as_ref().map(|_| self.saved_text.as_str()),
+                            self.is_dirty(),
+                            document::ExternalState::Unknown,
+                            read_only,
+                            true,
+                            true,
+                        )
+                    } else {
+                        self.document.ranged_snapshot(
+                            &self.text[start..end],
+                            self.is_dirty(),
+                            document::ExternalState::Unknown,
+                            read_only,
+                        )
+                    };
                     request.respond(agent::bounded_snapshot_response(snapshot));
                 }
                 agent::Request::DocumentPropose { patch, .. } => {
