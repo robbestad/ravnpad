@@ -112,6 +112,7 @@ impl ApiError {
             document::Error::MixedLineEndings => "mixed_line_endings",
             document::Error::EmbeddedNul => "embedded_nul",
             document::Error::ResultTooLarge => "result_too_large",
+            document::Error::ProposalPreviewTooLarge => "proposal_preview_too_large",
             document::Error::InvalidOperationId => "invalid_operation_id",
             document::Error::OperationIdReused => "operation_id_reused",
             document::Error::ProposalHistoryFull => "proposal_history_full",
@@ -610,7 +611,7 @@ mod tests {
     #[test]
     fn snapshot_response_accounts_for_json_escaping() {
         let text = "\u{1}".repeat(MAX_MESSAGE);
-        let document = document::Document::new(&text);
+        let document = document::Document::new(&text, usize::MAX);
         let snapshot = document.snapshot(
             &text,
             None,

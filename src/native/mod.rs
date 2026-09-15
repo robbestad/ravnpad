@@ -744,25 +744,12 @@ fn proposal_preview(before: &str, after: &str, hunks: &[document::ProposalHunk])
 
     fn excerpt(value: &str, changed_start: usize, changed_end: usize) -> String {
         const CONTEXT: usize = 256;
-        const LIMIT: usize = 1_400;
         let start = boundary_at_or_before(value, changed_start.saturating_sub(CONTEXT));
         let end = boundary_at_or_before(value, changed_end.saturating_add(CONTEXT));
         let end = end.max(changed_end).min(value.len());
         let leading = if start > 0 { "…\n" } else { "" };
         let trailing = if end < value.len() { "\n…" } else { "" };
-        let available = LIMIT.saturating_sub(leading.len() + trailing.len());
-        if end - start <= available {
-            return format!("{leading}{}{trailing}", &value[start..end]);
-        }
-
-        let half = available.saturating_sub("\n… omitted …\n".len()) / 2;
-        let head_end = boundary_at_or_before(value, start.saturating_add(half));
-        let tail_start = boundary_at_or_before(value, end.saturating_sub(half));
-        format!(
-            "{leading}{}\n… omitted …\n{}{trailing}",
-            &value[start..head_end],
-            &value[tail_start..end]
-        )
+        format!("{leading}{}{trailing}", &value[start..end])
     }
 
     hunks
@@ -864,5 +851,32 @@ mod tests {
         assert!(preview.contains("Change 1/3"));
         assert!(preview.contains("Change 2/3"));
         assert!(preview.contains("Change 3/3"));
+    }
+
+    #[test]
+    fn proposal_preview_preserves_an_entire_long_hunk() {
+        let before = format!(
+            "start{}MIDDLE-OLD{}end",
+            "x".repeat(3_000),
+            "x".repeat(3_000)
+        );
+        let after = format!(
+            "start{}MIDDLE-NEW{}end",
+            "y".repeat(3_000),
+            "y".repeat(3_000)
+        );
+        let preview = proposal_preview(
+            &before,
+            &after,
+            &[ProposalHunk {
+                before_start: 0,
+                before_end: before.len(),
+                after_start: 0,
+                after_end: after.len(),
+            }],
+        );
+        assert!(preview.contains("MIDDLE-OLD"));
+        assert!(preview.contains("MIDDLE-NEW"));
+        assert!(!preview.contains("omitted"));
     }
 }

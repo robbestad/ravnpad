@@ -14,8 +14,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const RANGE_UNIT: &str = "utf8-byte";
 const MAX_PROPOSAL_HISTORY: usize = 1024;
 const MAX_PATCH_EDITS: usize = 128;
-const MAX_PROPOSAL_RESULT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_RETAINED_PROPOSAL_BYTES: usize = 2 * MAX_PROPOSAL_RESULT_BYTES;
+const MAX_PREVIEW_CHANGED_BYTES: usize = 256 * 1024;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -71,10 +70,11 @@ pub struct Document {
     identity: Identity,
     observed_text: String,
     proposals: HashMap<String, StoredProposal>,
+    edit_limit: usize,
 }
 
 impl Document {
-    pub fn new(text: &str) -> Self {
+    pub fn new(text: &str, edit_limit: usize) -> Self {
         Self {
             identity: Identity {
                 instance_id: new_id("instance"),
@@ -83,6 +83,7 @@ impl Document {
             },
             observed_text: text.to_owned(),
             proposals: HashMap::new(),
+            edit_limit,
         }
     }
 
@@ -164,8 +165,19 @@ impl Document {
         if result.contains('\0') {
             return Err(Error::EmbeddedNul);
         }
-        if result.len() > MAX_PROPOSAL_RESULT_BYTES {
+        if !supported_line_endings(&result) {
+            return Err(Error::MixedLineEndings);
+        }
+        if result.len() > self.edit_limit {
             return Err(Error::ResultTooLarge);
+        }
+        let preview_changed_bytes = patch.edits.iter().fold(0usize, |total, edit| {
+            total
+                .saturating_add(edit.expected_text.len())
+                .saturating_add(edit.replacement.len())
+        });
+        if preview_changed_bytes > MAX_PREVIEW_CHANGED_BYTES {
+            return Err(Error::ProposalPreviewTooLarge);
         }
         let retained_bytes = self
             .proposals
@@ -174,7 +186,7 @@ impl Document {
             .map(|stored| stored.proposal.before.len() + stored.proposal.after.len())
             .sum::<usize>();
         if retained_bytes.saturating_add(current_text.len() + result.len())
-            > MAX_RETAINED_PROPOSAL_BYTES
+            > self.edit_limit.saturating_mul(2)
         {
             return Err(Error::ProposalMemoryFull);
         }
@@ -416,6 +428,7 @@ pub enum Error {
     MixedLineEndings,
     EmbeddedNul,
     ResultTooLarge,
+    ProposalPreviewTooLarge,
     InvalidOperationId,
     OperationIdReused,
     ProposalHistoryFull,
@@ -524,7 +537,7 @@ mod tests {
     #[test]
     fn proposal_hunks_track_each_edit_in_before_and_after_text() {
         let text = "one two three";
-        let mut document = Document::new(text);
+        let mut document = Document::new(text, usize::MAX);
         let proposal = document
             .propose(
                 patch(
@@ -639,7 +652,7 @@ mod tests {
 
     #[test]
     fn stale_proposal_cannot_be_approved() {
-        let mut document = Document::new("before");
+        let mut document = Document::new("before", usize::MAX);
         let request = patch(
             &document,
             "before",
@@ -660,7 +673,7 @@ mod tests {
 
     #[test]
     fn operation_ids_are_idempotent_but_cannot_be_reused() {
-        let mut document = Document::new("before");
+        let mut document = Document::new("before", usize::MAX);
         let request = patch(
             &document,
             "before",
@@ -704,7 +717,7 @@ mod tests {
 
     #[test]
     fn rejected_operation_id_stays_rejected() {
-        let mut document = Document::new("before");
+        let mut document = Document::new("before", usize::MAX);
         let request = patch(
             &document,
             "before",
@@ -734,7 +747,7 @@ mod tests {
 
     #[test]
     fn rejects_results_with_embedded_nul() {
-        let mut document = Document::new("before");
+        let mut document = Document::new("before", usize::MAX);
         let request = patch(
             &document,
             "before",
@@ -753,8 +766,63 @@ mod tests {
     }
 
     #[test]
+    fn validates_result_line_endings_and_platform_limit() {
+        let text = "a\nb\n";
+        let mut document = Document::new(text, usize::MAX);
+        let mixed = patch(
+            &document,
+            text,
+            vec![Edit {
+                start_byte: 0,
+                end_byte: 1,
+                expected_text: "a".into(),
+                replacement: "x\r\n".into(),
+            }],
+        );
+        assert!(matches!(
+            document.propose(mixed, text),
+            Err(Error::MixedLineEndings)
+        ));
+
+        let mut limited = Document::new("a", 3);
+        let too_large = patch(
+            &limited,
+            "a",
+            vec![Edit {
+                start_byte: 0,
+                end_byte: 1,
+                expected_text: "a".into(),
+                replacement: "four".into(),
+            }],
+        );
+        assert!(matches!(
+            limited.propose(too_large, "a"),
+            Err(Error::ResultTooLarge)
+        ));
+    }
+
+    #[test]
+    fn rejects_changes_too_large_to_preview_in_full() {
+        let mut document = Document::new("", usize::MAX);
+        let request = patch(
+            &document,
+            "",
+            vec![Edit {
+                start_byte: 0,
+                end_byte: 0,
+                expected_text: String::new(),
+                replacement: "x".repeat(MAX_PREVIEW_CHANGED_BYTES + 1),
+            }],
+        );
+        assert!(matches!(
+            document.propose(request, ""),
+            Err(Error::ProposalPreviewTooLarge)
+        ));
+    }
+
+    #[test]
     fn proposal_history_is_bounded_without_forgetting_idempotency() {
-        let mut document = Document::new("before");
+        let mut document = Document::new("before", usize::MAX);
         let mut first = None;
         for index in 0..MAX_PROPOSAL_HISTORY {
             let mut request = patch(
@@ -809,7 +877,7 @@ mod tests {
     #[test]
     fn mixed_line_endings_are_readable_but_not_editable() {
         let text = "a\r\nb\nc";
-        let mut document = Document::new(text);
+        let mut document = Document::new(text, usize::MAX);
         let snapshot = document.snapshot(
             text,
             Some(text),
@@ -838,7 +906,7 @@ mod tests {
 
     #[test]
     fn undo_and_redo_are_new_revisions() {
-        let mut document = Document::new("a");
+        let mut document = Document::new("a", usize::MAX);
         assert!(document.observe_text("b"));
         assert!(document.observe_text("a"));
         assert!(document.observe_text("b"));

@@ -260,7 +260,7 @@ impl RavnPad {
         let (spell_tx, spell_rx) = mpsc::channel();
         let (file_tx, file_rx) = mpsc::channel();
 
-        let document = document::Document::new("");
+        let document = document::Document::new("", large::EDIT_LIMIT as usize);
         let agent_requested = std::env::args().any(|arg| arg == "--enable-agent");
         let mut app = Self {
             file_tx,
@@ -2268,7 +2268,7 @@ mod tests {
             recovered_from: None,
             ctx: ctx.clone(),
             document_generation: 0,
-            document: document::Document::new(""),
+            document: document::Document::new("", large::EDIT_LIMIT as usize),
             agent: None,
             agent_requested: false,
             pending_agent: std::collections::VecDeque::new(),
