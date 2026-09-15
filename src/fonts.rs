@@ -53,7 +53,9 @@ pub fn available_fonts() -> Vec<FontChoice> {
         } else if b.id.is_empty() {
             std::cmp::Ordering::Greater
         } else {
-            a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
         }
     });
     fonts
@@ -92,9 +94,10 @@ pub fn apply(ctx: &egui::Context, font_id: &str, size: f32, fonts: &[FontChoice]
         TextStyle::Button,
         FontId::new(14.0, FontFamily::Proportional),
     );
-    style
-        .text_styles
-        .insert(TextStyle::Small, FontId::new(12.0, FontFamily::Proportional));
+    style.text_styles.insert(
+        TextStyle::Small,
+        FontId::new(12.0, FontFamily::Proportional),
+    );
     style.text_styles.insert(
         TextStyle::Monospace,
         FontId::new(size.clamp(10.0, 36.0), FontFamily::Monospace),
@@ -103,9 +106,11 @@ pub fn apply(ctx: &egui::Context, font_id: &str, size: f32, fonts: &[FontChoice]
 }
 
 fn is_style_variant(name: &str) -> bool {
-    ["bold", "italic", "oblique", "black", "light", "thin", "medium", "heavy"]
-        .iter()
-        .any(|part| name.contains(part))
+    [
+        "bold", "italic", "oblique", "black", "light", "thin", "medium", "heavy",
+    ]
+    .iter()
+    .any(|part| name.contains(part))
 }
 
 fn pretty_name(stem: &str) -> String {

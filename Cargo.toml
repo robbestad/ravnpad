@@ -1,6 +1,6 @@
 [package]
 name = "ravnpad"
-version = "1.3.9"
+version = "1.3.10"
 default-run = "ravnpad"
 edition = "2024"
 rust-version = "1.88"
@@ -8,9 +8,10 @@ description = "A simple UTF-8 notepad"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/robbestad/ravnpad"
-homepage = "https://github.com/robbestad/ravnpad"
+homepage = "https://ravnpad.com"
 keywords = ["notepad", "editor", "text", "gui", "egui"]
 categories = ["gui", "text-editors"]
+exclude = ["website", ".env"]
 
 
 [dependencies]

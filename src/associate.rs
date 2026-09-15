@@ -1,8 +1,8 @@
 use std::io;
 use std::path::Path;
 
-use winreg::enums::*;
 use winreg::RegKey;
+use winreg::enums::*;
 
 const PROGID: &str = "RavnPad.txt";
 const APP_NAME: &str = "RavnPad";

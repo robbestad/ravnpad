@@ -1,13 +1,17 @@
 use std::fs::{self, File};
-use std::io::{self, Write};
 #[cfg(windows)]
 use std::io::Read;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const OWNER: &str = "robbestad";
 const REPO: &str = "ravnpad";
-const USER_AGENT: &str = concat!("RavnPad/", env!("CARGO_PKG_VERSION"), " (+https://github.com/robbestad/ravnpad)");
+const USER_AGENT: &str = concat!(
+    "RavnPad/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/robbestad/ravnpad)"
+);
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
@@ -116,7 +120,11 @@ fn parse_release(json: &serde_json::Value, asset: &str) -> Result<Release, Error
         .flatten()
         .find_map(|item| {
             let name = item.get("name")?.as_str()?;
-            (name == asset).then(|| item.get("browser_download_url")?.as_str().map(str::to_owned))?
+            (name == asset).then(|| {
+                item.get("browser_download_url")?
+                    .as_str()
+                    .map(str::to_owned)
+            })?
         })
         .ok_or(Error::NoAsset)?;
     Ok(Release { version, url })
@@ -219,7 +227,8 @@ fn apply_payload(unpacked: &Path) -> Result<Restart, Error> {
             write_macos_helper(&app, &new_app)?;
             return Ok(Restart::Helper);
         }
-        let bin = mac_binary(unpacked).ok_or_else(|| Error::Zip("release zip is missing ravnpad".into()))?;
+        let bin = mac_binary(unpacked)
+            .ok_or_else(|| Error::Zip("release zip is missing ravnpad".into()))?;
         replace_running(&exe, &bin)?;
         return Ok(Restart::Spawn(exe));
     }

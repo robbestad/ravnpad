@@ -239,7 +239,11 @@ fn apply_word(word: &str, arg: Option<i32>, out: &mut String, skip: &mut i32, uc
         }
         "u" => {
             if let Some(n) = arg {
-                let code = if n < 0 { (n as i32 as u16) as u32 } else { n as u32 };
+                let code = if n < 0 {
+                    (n as i32 as u16) as u32
+                } else {
+                    n as u32
+                };
                 if let Some(ch) = char::from_u32(code) {
                     out.push(ch);
                 }
@@ -270,8 +274,8 @@ fn from_hex(byte: u8) -> Option<u8> {
 fn push_cp1252(out: &mut String, byte: u8) {
     const MAP: [char; 32] = [
         '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž',
-        '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '•', '–', '—', '˜', '™',
-        'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
+        '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '•', '–', '—', '˜',
+        '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
     ];
     if byte < 0x80 {
         out.push(byte as char);

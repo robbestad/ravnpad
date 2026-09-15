@@ -17,9 +17,7 @@ pub fn pick_open(title: &str, dir: Option<&Path>) -> Option<PathBuf> {
 }
 
 pub fn pick_save(title: &str, dir: Option<&Path>, file_name: &str) -> Option<PathBuf> {
-    let mut dialog = FileDialog::new()
-        .set_title(title)
-        .set_file_name(file_name);
+    let mut dialog = FileDialog::new().set_title(title).set_file_name(file_name);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }

@@ -76,7 +76,9 @@ impl LargeView {
         if let Some(fraction) = fraction {
             self.offset = (fraction.clamp(0.0, 1.0) * self.size as f64) as u64;
             self.prepared_for = None;
-            if fraction >= 1.0 { self.scroll_to_end(80, 120)?; }
+            if fraction >= 1.0 {
+                self.scroll_to_end(80, 120)?;
+            }
         }
         self.ensure_window(80, 120)?;
         Ok(self.window.clone())
@@ -120,13 +122,17 @@ impl LargeView {
         let first = if backwards {
             find_bytes(&mut file, 0, from, query, true, match_case, whole_word)?
         } else {
-            find_bytes(&mut file, from, self.size, query, false, match_case, whole_word)?
+            find_bytes(
+                &mut file, from, self.size, query, false, match_case, whole_word,
+            )?
         };
         if first.is_some() {
             return Ok(first);
         }
         if backwards {
-            find_bytes(&mut file, from, self.size, query, true, match_case, whole_word)
+            find_bytes(
+                &mut file, from, self.size, query, true, match_case, whole_word,
+            )
         } else {
             find_bytes(&mut file, 0, from, query, false, match_case, whole_word)
         }
@@ -253,10 +259,7 @@ impl LargeView {
             return Ok(());
         }
         let mut file = File::open(&self.path).map_err(FileError::Read)?;
-        self.size = file
-            .metadata()
-            .map(|meta| meta.len())
-            .unwrap_or(self.size);
+        self.size = file.metadata().map(|meta| meta.len()).unwrap_or(self.size);
         self.offset = self.offset.min(self.size);
         if self.offset > 0 {
             self.offset = utf8_floor(&mut file, self.offset).map_err(FileError::Read)?;
@@ -280,9 +283,8 @@ impl LargeView {
 
     fn scroll_to_end(&mut self, rows: usize, wrap_cols: usize) -> Result<(), FileError> {
         let mut file = File::open(&self.path).map_err(FileError::Read)?;
-        self.offset =
-            move_by_lines(&mut file, self.size, self.size, -(rows as i64), wrap_cols)
-                .map_err(FileError::Read)?;
+        self.offset = move_by_lines(&mut file, self.size, self.size, -(rows as i64), wrap_cols)
+            .map_err(FileError::Read)?;
         self.prepared_for = None;
         self.ensure_window(rows, wrap_cols)
     }
@@ -317,7 +319,8 @@ fn find_bytes(
             .saturating_add(candidates)
             .saturating_add(match_bytes)
             .saturating_add(4);
-        file.seek(SeekFrom::Start(read_start)).map_err(FileError::Read)?;
+        file.seek(SeekFrom::Start(read_start))
+            .map_err(FileError::Read)?;
         let mut bytes = vec![0; wanted];
         let count = file.read(&mut bytes).map_err(FileError::Read)?;
         bytes.truncate(count);
@@ -421,8 +424,13 @@ fn scrollbar_thumb_height(track: f32) -> f32 {
 }
 
 fn file_scrollbar(ui: &mut egui::Ui, offset: u64, size: u64, height: f32) -> Option<u64> {
-    let height = if height.is_finite() { height.max(0.0) } else { 0.0 };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, height), Sense::click_and_drag());
+    let height = if height.is_finite() {
+        height.max(0.0)
+    } else {
+        0.0
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(14.0, height), Sense::click_and_drag());
     let visuals = ui.visuals();
     ui.painter()
         .rect_filled(rect, 3.0, visuals.extreme_bg_color);
@@ -647,12 +655,7 @@ fn scan_forward(
     Ok((pos + i as u64).min(size))
 }
 
-fn scan_backward(
-    file: &mut File,
-    pos: u64,
-    lines: u64,
-    wrap_cols: usize,
-) -> std::io::Result<u64> {
+fn scan_backward(file: &mut File, pos: u64, lines: u64, wrap_cols: usize) -> std::io::Result<u64> {
     if lines == 0 {
         return Ok(pos);
     }
@@ -892,7 +895,8 @@ mod tests {
             Some(((CHUNK - 1) as u64, 6))
         );
         assert_eq!(
-            view.find_from("Needle", data.len() as u64, false, true, false).unwrap(),
+            view.find_from("Needle", data.len() as u64, false, true, false)
+                .unwrap(),
             Some(((CHUNK - 1) as u64, 6))
         );
         let _ = fs::remove_file(path);

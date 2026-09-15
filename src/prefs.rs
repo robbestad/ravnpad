@@ -148,7 +148,9 @@ pub fn recent_labels(paths: &[PathBuf]) -> Vec<String> {
     use std::collections::HashMap;
     let mut counts = HashMap::new();
     for path in paths {
-        *counts.entry(path.file_name().map(|name| name.to_os_string())).or_insert(0usize) += 1;
+        *counts
+            .entry(path.file_name().map(|name| name.to_os_string()))
+            .or_insert(0usize) += 1;
     }
     paths
         .iter()

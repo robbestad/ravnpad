@@ -33,7 +33,7 @@ It starts instantly, stays out of the way, and does not try to become an IDE.
 
 ## Get it
 
-**Windows and macOS:** grab a binary from [GitHub Releases](https://github.com/robbestad/ravnpad/releases).
+Download Windows and macOS builds from [ravnpad.com](https://ravnpad.com), or grab a binary from [GitHub Releases](https://github.com/robbestad/ravnpad/releases).
 
 - Windows: unzip and run `ravnpad.exe`
 - Apple Silicon: `ravnpad-macos-aarch64.zip`
