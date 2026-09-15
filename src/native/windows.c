@@ -24,7 +24,7 @@ static FINDREPLACEW find;
 static DWORD findOptions=FR_DOWN;
 static wchar_t query[1024], replacement[1024], currentFont[LF_FACESIZE];
 static double currentSize;
-static int updating, busy, readonlyDocument, currentSpell, currentWrap=-1, currentTheme=-1, darkTheme, smokeTest, smokeResult, documentDirty;
+static int updating, busy, readonlyDocument, currentSpell, currentWrap=-1, currentTheme=-1, currentAgent, darkTheme, smokeTest, smokeResult, documentDirty;
 static int wheelRemainder;
 static LONG selectionAnchor=-1;
 static UINT dpi=96;
@@ -102,6 +102,9 @@ void rp_rebuild_menus(void) {
     themeMenu=submenu(settings,RP_THEME); entry(themeMenu,RP_THEME_SYSTEM,NULL); entry(themeMenu,RP_THEME_LIGHT,NULL); entry(themeMenu,RP_THEME_DARK,NULL);
     if(currentTheme>=0) CheckMenuRadioItem(themeMenu,RP_THEME_SYSTEM,RP_THEME_DARK,RP_THEME_SYSTEM+currentTheme,MF_BYCOMMAND);
     HMENU languages=submenu(settings,RP_LANGUAGE); for(int i=0;i<15;i++) entry(languages,100+i,NULL);
+    HMENU agent=submenu(menu,RP_AGENT);
+    int agentEntry=currentAgent?RP_AGENT_ENABLED:RP_ENABLE_AGENT; entry(agent,agentEntry,NULL);
+    if(currentAgent) EnableMenuItem(agent,agentEntry,MF_BYCOMMAND|MF_GRAYED);
     HMENU help=submenu(menu,RP_HELP); entry(help,RP_UPDATE,NULL); entry(help,RP_ABOUT,NULL);
     SetMenu(window,menu); DrawMenuBar(window); if(previous) DestroyMenu(previous);
 }
@@ -528,6 +531,11 @@ void rp_theme(int preference) {
     currentTheme=preference;
     apply_colors();
     if(themeMenu) CheckMenuRadioItem(themeMenu,RP_THEME_SYSTEM,RP_THEME_DARK,RP_THEME_SYSTEM+preference,MF_BYCOMMAND);
+}
+void rp_agent(int enabled) {
+    if(currentAgent==enabled) return;
+    currentAgent=enabled;
+    rp_rebuild_menus();
 }
 double rp_read_position(void) {
     SCROLLINFO info={0}; info.cbSize=sizeof(info); info.fMask=SIF_RANGE|SIF_PAGE|SIF_POS;
