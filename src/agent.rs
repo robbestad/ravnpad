@@ -4,6 +4,8 @@ use crate::document::{self, Identity, Patch, Proposal, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -13,6 +15,8 @@ use std::time::Duration;
 
 const MAX_MESSAGE: usize = 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(unix)]
+const MAX_CLIENT_WORKERS: usize = 16;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -648,12 +652,32 @@ fn listen(
     tx: Sender<HostRequest>,
     ctx: eframe::egui::Context,
 ) {
+    let workers = Arc::new(AtomicUsize::new(0));
     while active.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                if workers
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        (count < MAX_CLIENT_WORKERS).then_some(count + 1)
+                    })
+                    .is_err()
+                {
+                    continue;
+                }
                 let client_tx = tx.clone();
                 let client_ctx = ctx.clone();
-                std::thread::spawn(move || handle_unix_client(stream, &client_tx, &client_ctx));
+                let client_active = active.clone();
+                let client_workers = workers.clone();
+                if std::thread::Builder::new()
+                    .name("ravnpad-agent-client".into())
+                    .spawn(move || {
+                        handle_unix_client(stream, &client_active, &client_tx, &client_ctx);
+                        client_workers.fetch_sub(1, Ordering::AcqRel);
+                    })
+                    .is_err()
+                {
+                    workers.fetch_sub(1, Ordering::AcqRel);
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(25));
@@ -666,17 +690,33 @@ fn listen(
 #[cfg(unix)]
 fn handle_unix_client(
     mut stream: std::os::unix::net::UnixStream,
+    active: &AtomicBool,
     tx: &Sender<HostRequest>,
     ctx: &eframe::egui::Context,
 ) {
     use std::io::{Read as _, Write as _};
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let mut bytes = Vec::new();
-    if (&mut stream)
-        .take((MAX_MESSAGE + 1) as u64)
-        .read_to_end(&mut bytes)
-        .is_ok()
-    {
+    let mut chunk = [0_u8; 8192];
+    while active.load(Ordering::Acquire) && bytes.len() <= MAX_MESSAGE {
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                let response = dispatch(&bytes, tx, ctx);
+                if let Ok(encoded) = serde_json::to_vec(&response) {
+                    let _ = stream.write_all(&encoded);
+                }
+                return;
+            }
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return,
+        }
+    }
+    if active.load(Ordering::Acquire) && bytes.len() > MAX_MESSAGE {
         let response = dispatch(&bytes, tx, ctx);
         if let Ok(encoded) = serde_json::to_vec(&response) {
             let _ = stream.write_all(&encoded);
