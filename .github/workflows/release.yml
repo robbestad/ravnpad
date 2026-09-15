@@ -85,10 +85,12 @@ jobs:
           # Sign nested executables before sealing the complete bundle.
           # "-" is a free ad hoc identity, not a Developer ID certificate.
           codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad
-          codesign --force --sign - RavnPad.app/Contents/Helpers/ravnpad-cli
-          codesign --force --sign - RavnPad.app/Contents/Helpers/ravnpad-mcp
-          # Re-sign recursively for consistent ad hoc signatures across runner versions.
-          codesign --force --deep --sign - RavnPad.app
+          codesign --force --identifier com.ravnpress.ravnpad.cli --sign - RavnPad.app/Contents/Helpers/ravnpad-cli
+          codesign --force --identifier com.ravnpress.ravnpad.mcp --sign - RavnPad.app/Contents/Helpers/ravnpad-mcp
+          codesign --verify --strict --verbose=4 RavnPad.app/Contents/MacOS/ravnpad
+          codesign --verify --strict --verbose=4 RavnPad.app/Contents/Helpers/ravnpad-cli
+          codesign --verify --strict --verbose=4 RavnPad.app/Contents/Helpers/ravnpad-mcp
+          codesign --force --sign - RavnPad.app
           codesign --verify --deep --strict --verbose=4 RavnPad.app
           ditto -c -k --sequesterRsrc --keepParent RavnPad.app "${{ matrix.artifact }}"
 
