@@ -656,11 +656,31 @@ impl RavnPad {
     }
 
     fn stop_agent(&mut self) {
-        while let Some(operation_id) = self.pending_agent.pop_front() {
-            self.reject_agent_proposal(&operation_id);
-        }
+        self.pending_agent.clear();
+        self.document.reject_pending();
         self.agent = None;
         self.agent_requested = false;
+    }
+
+    fn agent_helper_path(name: &str) -> String {
+        let executable = if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        };
+        let current = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ravnpad"));
+        #[cfg(target_os = "macos")]
+        let directory = current
+            .parent()
+            .and_then(Path::parent)
+            .map(|contents| contents.join("Helpers"));
+        #[cfg(not(target_os = "macos"))]
+        let directory = current.parent().map(Path::to_path_buf);
+        directory
+            .unwrap_or_default()
+            .join(executable)
+            .display()
+            .to_string()
     }
 
     fn agent_help_text(&self) -> String {
@@ -669,6 +689,8 @@ impl RavnPad {
             .map(|path| path.join("agent").display().to_string())
             .unwrap_or_else(|| "<agent configuration directory>".to_owned());
         let norwegian = matches!(self.prefs.lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk);
+        let cli = Self::agent_helper_path("ravnpad-cli");
+        let mcp = Self::agent_helper_path("ravnpad-mcp");
         let state = match (norwegian, self.agent.is_some()) {
             (true, true) => "AKTIV — lokale agenter kan finne dette vinduet",
             (true, false) => "INAKTIV — vinduet eksponerer ikke dokumentet",
@@ -676,7 +698,7 @@ impl RavnPad {
             (false, false) => "INACTIVE — this window does not expose a document endpoint",
         };
         let commands = format!(
-            "ravnpad-cli document status --instance {} --json\nravnpad-cli document read --instance {} --document {} --json\nravnpad-cli document propose --instance {} --document {} --stdin --json",
+            "\"{cli}\" document status --instance {} --json\n\"{cli}\" document read --instance {} --document {} --json\n\"{cli}\" document propose --instance {} --document {} --stdin --json",
             identity.instance_id,
             identity.instance_id,
             identity.document_id,
@@ -685,12 +707,12 @@ impl RavnPad {
         );
         if norwegian {
             format!(
-                "Status: {state}\n\nSlik finner agenten vinduet\nRavnPad skriver en eierbeskyttet endpoint-fil i:\n{directory}\n\nFilnavnet er instance-ID-en. Agenten finner filen lokalt og bruker deretter document status for å få ID-en til dokumentet som er åpent nå.\n\nInstance-ID:\n{}\n\nGjeldende document-ID:\n{}\n\nCLI-eksempel\n{commands}\n\nForslaget til den siste kommandoen sendes som patch-JSON på stdin. MCP-klienter kan starte ravnpad-mcp, som tilbyr de samme status-, read- og propose-operasjonene over stdio.\n\nBare lokale prosesser under din brukerkonto får tilgang. Når agentmodus deaktiveres eller RavnPad lukkes, fjernes endpointen. Når et annet dokument åpnes, blir denne document-ID-en ugyldig.",
+                "Status: {state}\n\nSlik finner agenten vinduet\nRavnPad skriver en eierbeskyttet endpoint-fil i:\n{directory}\n\nFilnavnet er instance-ID-en. Agenten finner filen lokalt og bruker deretter document status for å få ID-en til dokumentet som er åpent nå.\n\nInstance-ID:\n{}\n\nGjeldende document-ID:\n{}\n\nCLI-eksempel\n{commands}\n\nForslaget til den siste kommandoen sendes som patch-JSON på stdin. MCP-klienter kan starte:\n\"{mcp}\"\nDette tilbyr de samme status-, read- og propose-operasjonene over stdio.\n\nBare lokale prosesser under din brukerkonto får tilgang. Når agentmodus deaktiveres eller RavnPad lukkes, fjernes endpointen. Når et annet dokument åpnes, blir denne document-ID-en ugyldig.",
                 identity.instance_id, identity.document_id,
             )
         } else {
             format!(
-                "Status: {state}\n\nHow an agent finds this window\nRavnPad writes an owner-only endpoint file in:\n{directory}\n\nThe filename is the instance ID. The agent discovers it locally, then uses document status to resolve the ID of the document that is open now.\n\nInstance ID:\n{}\n\nCurrent document ID:\n{}\n\nCLI example\n{commands}\n\nThe final command receives the proposed patch JSON on stdin. MCP clients can start ravnpad-mcp, which exposes the same status, read, and propose operations over stdio.\n\nOnly local processes running as your user can connect. Deactivating agent mode or closing RavnPad removes the endpoint. Opening another document invalidates this document ID.",
+                "Status: {state}\n\nHow an agent finds this window\nRavnPad writes an owner-only endpoint file in:\n{directory}\n\nThe filename is the instance ID. The agent discovers it locally, then uses document status to resolve the ID of the document that is open now.\n\nInstance ID:\n{}\n\nCurrent document ID:\n{}\n\nCLI example\n{commands}\n\nThe final command receives the proposed patch JSON on stdin. MCP clients can start:\n\"{mcp}\"\nThis exposes the same status, read, and propose operations over stdio.\n\nOnly local processes running as your user can connect. Deactivating agent mode or closing RavnPad removes the endpoint. Opening another document invalidates this document ID.",
                 identity.instance_id, identity.document_id,
             )
         }

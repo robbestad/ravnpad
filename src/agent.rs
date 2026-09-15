@@ -281,6 +281,7 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.endpoint_path);
         self.active.store(false, Ordering::Release);
+        #[cfg(windows)]
         wake_listener(&self.listener_address);
         cleanup_listener_address(&self.listener_address);
     }
@@ -386,17 +387,14 @@ type PreparedListener = std::os::unix::net::UnixListener;
 #[cfg(unix)]
 fn prepare_listener(address: &str) -> io::Result<PreparedListener> {
     let _ = std::fs::remove_file(address);
-    std::os::unix::net::UnixListener::bind(address)
+    let listener = std::os::unix::net::UnixListener::bind(address)?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
 }
 
 #[cfg(unix)]
 fn cleanup_listener_address(address: &str) {
     let _ = std::fs::remove_file(address);
-}
-
-#[cfg(unix)]
-fn wake_listener(address: &str) {
-    let _ = std::os::unix::net::UnixStream::connect(address);
 }
 
 #[cfg(windows)]
@@ -650,25 +648,38 @@ fn listen(
     tx: Sender<HostRequest>,
     ctx: eframe::egui::Context,
 ) {
-    use std::io::{Read as _, Write as _};
-    for stream in listener.incoming() {
-        if !active.load(Ordering::Acquire) {
-            break;
-        }
-        let Ok(mut stream) = stream else { continue };
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-        let mut bytes = Vec::new();
-        match (&mut stream)
-            .take((MAX_MESSAGE + 1) as u64)
-            .read_to_end(&mut bytes)
-        {
-            Ok(_) => {
-                let response = dispatch(&bytes, &tx, &ctx);
-                if let Ok(encoded) = serde_json::to_vec(&response) {
-                    let _ = stream.write_all(&encoded);
-                }
+    while active.load(Ordering::Acquire) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let client_tx = tx.clone();
+                let client_ctx = ctx.clone();
+                std::thread::spawn(move || handle_unix_client(stream, &client_tx, &client_ctx));
             }
-            Err(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn handle_unix_client(
+    mut stream: std::os::unix::net::UnixStream,
+    tx: &Sender<HostRequest>,
+    ctx: &eframe::egui::Context,
+) {
+    use std::io::{Read as _, Write as _};
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut bytes = Vec::new();
+    if (&mut stream)
+        .take((MAX_MESSAGE + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_ok()
+    {
+        let response = dispatch(&bytes, tx, ctx);
+        if let Ok(encoded) = serde_json::to_vec(&response) {
+            let _ = stream.write_all(&encoded);
         }
     }
 }
