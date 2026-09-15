@@ -120,7 +120,7 @@ ravnpad-cli document propose --instance INSTANCE_ID --document DOCUMENT_ID --std
 
 The Windows release archive places `ravnpad-cli.exe` and `ravnpad-mcp.exe`
 beside `ravnpad.exe`. The macOS release bundle places both command-line tools
-in `RavnPad.app/Contents/MacOS/`.
+in `RavnPad.app/Contents/Helpers/`.
 
 Instance IDs are the names of the small endpoint files in RavnPad's `agent`
 configuration directory. `document status` resolves the current document ID.

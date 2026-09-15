@@ -72,11 +72,11 @@ jobs:
       - name: Package macOS
         if: runner.os == 'macOS'
         run: |
-          mkdir -p RavnPad.app/Contents/MacOS RavnPad.app/Contents/Resources
+          mkdir -p RavnPad.app/Contents/MacOS RavnPad.app/Contents/Helpers RavnPad.app/Contents/Resources
           cp target/release/ravnpad RavnPad.app/Contents/MacOS/ravnpad
-          cp target/release/ravnpad-cli RavnPad.app/Contents/MacOS/ravnpad-cli
-          cp target/release/ravnpad-mcp RavnPad.app/Contents/MacOS/ravnpad-mcp
-          chmod +x RavnPad.app/Contents/MacOS/ravnpad RavnPad.app/Contents/MacOS/ravnpad-cli RavnPad.app/Contents/MacOS/ravnpad-mcp
+          cp target/release/ravnpad-cli RavnPad.app/Contents/Helpers/ravnpad-cli
+          cp target/release/ravnpad-mcp RavnPad.app/Contents/Helpers/ravnpad-mcp
+          chmod +x RavnPad.app/Contents/MacOS/ravnpad RavnPad.app/Contents/Helpers/ravnpad-cli RavnPad.app/Contents/Helpers/ravnpad-mcp
           cp packaging/macos/Info.plist RavnPad.app/Contents/Info.plist
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" -c "Set :CFBundleVersion $version" RavnPad.app/Contents/Info.plist
@@ -85,8 +85,8 @@ jobs:
           # Sign nested executables before sealing the complete bundle.
           # "-" is a free ad hoc identity, not a Developer ID certificate.
           codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad
-          codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad-cli
-          codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad-mcp
+          codesign --force --sign - RavnPad.app/Contents/Helpers/ravnpad-cli
+          codesign --force --sign - RavnPad.app/Contents/Helpers/ravnpad-mcp
           # Re-sign recursively for consistent ad hoc signatures across runner versions.
           codesign --force --deep --sign - RavnPad.app
           codesign --verify --deep --strict --verbose=4 RavnPad.app
@@ -97,8 +97,8 @@ jobs:
           ditto -x -k "${{ matrix.artifact }}" "$verify_dir"
           codesign --verify --deep --strict --verbose=4 "$verify_dir/RavnPad.app"
           test -x "$verify_dir/RavnPad.app/Contents/MacOS/ravnpad"
-          test -x "$verify_dir/RavnPad.app/Contents/MacOS/ravnpad-cli"
-          test -x "$verify_dir/RavnPad.app/Contents/MacOS/ravnpad-mcp"
+          test -x "$verify_dir/RavnPad.app/Contents/Helpers/ravnpad-cli"
+          test -x "$verify_dir/RavnPad.app/Contents/Helpers/ravnpad-mcp"
           test -f "$verify_dir/RavnPad.app/Contents/Resources/RavnPad.icns"
           rm -rf "$verify_dir"
 
@@ -134,6 +134,6 @@ jobs:
 
             - **Windows:** unzip and run `ravnpad.exe`
             - **macOS:** unzip `RavnPad.app`. The app is ad hoc signed, but not Apple-notarized. Gatekeeper may block the first launch. See the [macOS installation instructions](https://github.com/robbestad/ravnpad/blob/${{ github.ref_name }}/README.md#macos) for manual approval and troubleshooting.
-            - **Agent tools:** Windows archives include `ravnpad-cli.exe` and `ravnpad-mcp.exe`; macOS bundles include both tools under `RavnPad.app/Contents/MacOS/`.
+            - **Agent tools:** Windows archives include `ravnpad-cli.exe` and `ravnpad-mcp.exe`; macOS bundles include both tools under `RavnPad.app/Contents/Helpers/`.
 
             Apple Silicon: `ravnpad-macos-aarch64.zip`. Intel: `ravnpad-macos-x86_64.zip`.
