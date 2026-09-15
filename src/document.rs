@@ -12,6 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const RANGE_UNIT: &str = "utf8-byte";
+const MAX_PROPOSAL_HISTORY: usize = 1024;
+const MAX_PROPOSAL_RESULT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RETAINED_PROPOSAL_BYTES: usize = 2 * MAX_PROPOSAL_RESULT_BYTES;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -143,28 +146,53 @@ impl Document {
         if patch.operation_id.is_empty() || patch.operation_id.len() > 128 {
             return Err(Error::InvalidOperationId);
         }
+        let patch_fingerprint = patch_fingerprint(&patch);
         if self.proposals.contains_key(&patch.operation_id) {
             let stored = &self.proposals[&patch.operation_id];
-            if stored.patch == patch {
+            if stored.patch_fingerprint == patch_fingerprint {
                 return Ok(&stored.proposal);
             }
             return Err(Error::OperationIdReused);
         }
+        if self.proposals.len() >= MAX_PROPOSAL_HISTORY {
+            return Err(Error::ProposalHistoryFull);
+        }
         self.validate_base(&patch, current_text)?;
         let result = apply_edits(current_text, &patch.edits)?;
+        if result.contains('\0') {
+            return Err(Error::EmbeddedNul);
+        }
+        if result.len() > MAX_PROPOSAL_RESULT_BYTES {
+            return Err(Error::ResultTooLarge);
+        }
+        let retained_bytes = self
+            .proposals
+            .values()
+            .filter(|stored| stored.status == ProposalStatus::Pending)
+            .map(|stored| stored.proposal.before.len() + stored.proposal.after.len())
+            .sum::<usize>();
+        if retained_bytes.saturating_add(current_text.len() + result.len())
+            > MAX_RETAINED_PROPOSAL_BYTES
+        {
+            return Err(Error::ProposalMemoryFull);
+        }
         let proposal = Proposal {
             proposal_id: new_id("proposal"),
             operation_id: patch.operation_id.clone(),
             document_id: patch.document_id.clone(),
             base_revision: patch.base_revision,
             base_hash: patch.base_hash.clone(),
+            before_hash: hash(current_text),
+            after_hash: hash(&result),
+            before_bytes: current_text.len(),
+            after_bytes: result.len(),
             before: current_text.to_owned(),
             after: result,
         };
         self.proposals.insert(
             patch.operation_id.clone(),
             StoredProposal {
-                patch: patch.clone(),
+                patch_fingerprint,
                 proposal,
                 status: ProposalStatus::Pending,
             },
@@ -178,19 +206,23 @@ impl Document {
             .get(operation_id)
             .ok_or(Error::ProposalNotFound)?;
         if stored.status == ProposalStatus::Applied {
-            return Ok(stored.proposal.after.clone());
+            return if hash(current_text) == stored.proposal.after_hash {
+                Ok(current_text.to_owned())
+            } else {
+                Err(Error::ProposalAlreadyApplied)
+            };
         }
         if stored.status == ProposalStatus::Rejected {
             return Err(Error::ProposalRejected);
         }
-        if stored.patch.document_id != self.identity.document_id {
+        if stored.proposal.document_id != self.identity.document_id {
             return Err(Error::WrongDocument);
         }
-        if stored.patch.base_revision != self.identity.revision
-            || stored.patch.base_hash != hash(current_text)
+        if stored.proposal.base_revision != self.identity.revision
+            || stored.proposal.base_hash != hash(current_text)
         {
             return Err(Error::StaleRevision {
-                expected: stored.patch.base_revision,
+                expected: stored.proposal.base_revision,
                 actual: self.identity.revision,
             });
         }
@@ -206,6 +238,7 @@ impl Document {
             return Err(Error::ProposalAlreadyApplied);
         }
         stored.status = ProposalStatus::Rejected;
+        stored.proposal.release_bodies();
         Ok(())
     }
 
@@ -228,6 +261,7 @@ impl Document {
             return Err(Error::ProposalRejected);
         }
         stored.status = ProposalStatus::Applied;
+        stored.proposal.release_bodies();
         self.observe_text(applied_text);
         Ok(())
     }
@@ -298,15 +332,30 @@ pub struct Proposal {
     pub document_id: String,
     pub base_revision: u64,
     pub base_hash: String,
+    pub before_hash: String,
+    pub after_hash: String,
+    pub before_bytes: usize,
+    pub after_bytes: usize,
     pub before: String,
     pub after: String,
 }
 
+impl Proposal {
+    fn release_bodies(&mut self) {
+        self.before = String::new();
+        self.after = String::new();
+    }
+}
+
 #[derive(Clone, Debug)]
 struct StoredProposal {
-    patch: Patch,
+    patch_fingerprint: [u8; 32],
     proposal: Proposal,
     status: ProposalStatus,
+}
+
+fn patch_fingerprint(patch: &Patch) -> [u8; 32] {
+    Sha256::digest(serde_json::to_vec(patch).expect("patch serialization cannot fail")).into()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,8 +378,12 @@ pub enum Error {
     OverlappingEdits { first: usize, second: usize },
     AmbiguousInsertion { first: usize, second: usize },
     MixedLineEndings,
+    EmbeddedNul,
+    ResultTooLarge,
     InvalidOperationId,
     OperationIdReused,
+    ProposalHistoryFull,
+    ProposalMemoryFull,
     ProposalNotFound,
     ProposalRejected,
     ProposalAlreadyApplied,
@@ -543,10 +596,11 @@ mod tests {
             document.proposal_status("operation-42"),
             Some(ProposalStatus::Applied)
         );
-        assert_eq!(
-            document.propose(request, &applied).unwrap().after,
-            "after"
-        );
+        let repeated = document.propose(request, &applied).unwrap();
+        assert_eq!(repeated.after_hash, hash("after"));
+        assert_eq!(repeated.after_bytes, "after".len());
+        assert!(repeated.before.is_empty());
+        assert!(repeated.after.is_empty());
     }
 
     #[test]
@@ -572,10 +626,85 @@ mod tests {
             document.approve("operation-42", "before"),
             Err(Error::ProposalRejected)
         ));
-        assert_eq!(
-            document.propose(request, "before").unwrap().after,
-            "after"
+        let repeated = document.propose(request, "before").unwrap();
+        assert_eq!(repeated.after_hash, hash("after"));
+        assert_eq!(repeated.after_bytes, "after".len());
+        assert!(repeated.before.is_empty());
+        assert!(repeated.after.is_empty());
+    }
+
+    #[test]
+    fn rejects_results_with_embedded_nul() {
+        let mut document = Document::new("before");
+        let request = patch(
+            &document,
+            "before",
+            vec![Edit {
+                start_byte: 0,
+                end_byte: 6,
+                expected_text: "before".into(),
+                replacement: "after\0hidden".into(),
+            }],
         );
+        assert!(matches!(
+            document.propose(request, "before"),
+            Err(Error::EmbeddedNul)
+        ));
+        assert!(document.proposal("operation-42").is_none());
+    }
+
+    #[test]
+    fn proposal_history_is_bounded_without_forgetting_idempotency() {
+        let mut document = Document::new("before");
+        let mut first = None;
+        for index in 0..MAX_PROPOSAL_HISTORY {
+            let mut request = patch(
+                &document,
+                "before",
+                vec![Edit {
+                    start_byte: 0,
+                    end_byte: 6,
+                    expected_text: "before".into(),
+                    replacement: "after".into(),
+                }],
+            );
+            request.operation_id = format!("operation-{index}");
+            let proposal_id = document
+                .propose(request.clone(), "before")
+                .unwrap()
+                .proposal_id
+                .clone();
+            if index == 0 {
+                first = Some((request, proposal_id));
+            }
+            document.reject(&format!("operation-{index}")).unwrap();
+        }
+        let (first_request, first_id) = first.unwrap();
+        assert_eq!(
+            document
+                .propose(first_request, "before")
+                .unwrap()
+                .proposal_id,
+            first_id
+        );
+        let mut overflow = patch(
+            &document,
+            "before",
+            vec![Edit {
+                start_byte: 0,
+                end_byte: 6,
+                expected_text: "before".into(),
+                replacement: "other".into(),
+            }],
+        );
+        overflow.operation_id = "operation-overflow".into();
+        assert!(matches!(
+            document.propose(overflow, "before"),
+            Err(Error::ProposalHistoryFull)
+        ));
+        assert!(document.proposals.values().all(|stored| {
+            stored.proposal.before.is_empty() && stored.proposal.after.is_empty()
+        }));
     }
 
     #[test]

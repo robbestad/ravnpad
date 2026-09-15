@@ -744,7 +744,7 @@ impl RavnPad {
                             .capabilities
                             .retain(|capability| *capability != "propose");
                     }
-                    request.respond(agent::Response::Ok { snapshot });
+                    request.respond(agent::bounded_snapshot_response(snapshot));
                 }
                 agent::Request::DocumentPropose { patch, .. } => {
                     if self.large.is_some() || self.text.contains('\0') {

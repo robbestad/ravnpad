@@ -134,6 +134,14 @@ changes nothing; approval updates the buffer as one undoable action and does not
 save the target file. Stale revisions, invalid UTF-8 boundaries, overlapping
 edits, ambiguous insertions, and mixed line endings are rejected.
 
+Read responses are shortened at a UTF-8 boundary when JSON escaping would make
+the encoded response exceed the one-MiB transport limit; `content_complete` is
+then false. Proposal results are limited to 16 MiB and cannot contain NUL.
+Pending proposal bodies share a 32 MiB memory budget. Completed proposals retain
+only bounded receipt metadata, while up to 1,024 operation IDs remain available
+for idempotent retries during the document session. Once that history is full,
+new operation IDs are rejected until another document is opened.
+
 `ravnpad-mcp` exposes the same status, read, and propose operations as MCP tools
 over stdio. It writes only newline-delimited JSON-RPC messages to stdout; logs
 and diagnostics go to stderr.

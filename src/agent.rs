@@ -51,9 +51,9 @@ pub enum Response {
 
 /// Bounded transport representation of a proposal.
 ///
-/// The editor retains the complete before/after documents for the approval UI.
-/// Returning them over IPC would duplicate the document and can exceed the
-/// one-MiB transport limit even when the request itself is small.
+/// Pending proposals retain their complete before/after documents for the
+/// approval UI. Returning them over IPC would duplicate the document and can
+/// exceed the one-MiB transport limit even when the request itself is small.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProposalReceipt {
     pub proposal_id: String,
@@ -75,10 +75,10 @@ impl From<&Proposal> for ProposalReceipt {
             document_id: proposal.document_id.clone(),
             base_revision: proposal.base_revision,
             base_hash: proposal.base_hash.clone(),
-            before_hash: document::hash(&proposal.before),
-            after_hash: document::hash(&proposal.after),
-            before_bytes: proposal.before.len(),
-            after_bytes: proposal.after.len(),
+            before_hash: proposal.before_hash.clone(),
+            after_hash: proposal.after_hash.clone(),
+            before_bytes: proposal.before_bytes,
+            after_bytes: proposal.after_bytes,
         }
     }
 }
@@ -109,14 +109,83 @@ impl ApiError {
             document::Error::OverlappingEdits { .. } => "overlapping_edits",
             document::Error::AmbiguousInsertion { .. } => "ambiguous_insertion",
             document::Error::MixedLineEndings => "mixed_line_endings",
+            document::Error::EmbeddedNul => "embedded_nul",
+            document::Error::ResultTooLarge => "result_too_large",
             document::Error::InvalidOperationId => "invalid_operation_id",
             document::Error::OperationIdReused => "operation_id_reused",
+            document::Error::ProposalHistoryFull => "proposal_history_full",
+            document::Error::ProposalMemoryFull => "proposal_memory_full",
             document::Error::ProposalNotFound => "proposal_not_found",
             document::Error::ProposalRejected => "proposal_rejected",
             document::Error::ProposalAlreadyApplied => "proposal_already_applied",
         };
         Self::new(code, error.to_string())
     }
+}
+
+/// Clamp a snapshot to the exact serialized transport limit.
+///
+/// JSON escaping can expand a text slice by up to six bytes per input byte, so
+/// bounding the requested raw byte range alone is insufficient.
+pub fn bounded_snapshot_response(mut snapshot: Snapshot) -> Response {
+    if snapshot_response_len(&snapshot) <= MAX_MESSAGE {
+        return Response::Ok { snapshot };
+    }
+
+    snapshot.content_complete = false;
+    snapshot
+        .capabilities
+        .retain(|capability| *capability != "propose");
+    loop {
+        let length = snapshot_response_len(&snapshot);
+        if length <= MAX_MESSAGE {
+            break;
+        }
+        if snapshot.text.is_empty() {
+            return Response::Error {
+                error: ApiError::new("response_too_large", "snapshot metadata exceeds one MiB"),
+            };
+        }
+        let mut end =
+            ((snapshot.text.len() as u128 * MAX_MESSAGE as u128) / length as u128) as usize;
+        end = end.min(snapshot.text.len() - 1);
+        while end > 0 && !snapshot.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        snapshot.text.truncate(end);
+        snapshot.buffer_hash = document::hash(&snapshot.text);
+    }
+    Response::Ok { snapshot }
+}
+
+fn snapshot_response_len(snapshot: &Snapshot) -> usize {
+    #[derive(Serialize)]
+    struct SnapshotResponse<'a> {
+        status: &'static str,
+        snapshot: &'a Snapshot,
+    }
+    struct CountingWriter(usize);
+    impl io::Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(
+        &mut writer,
+        &SnapshotResponse {
+            status: "ok",
+            snapshot,
+        },
+    )
+    .map(|_| writer.0)
+    .unwrap_or(usize::MAX)
 }
 
 pub struct HostRequest {
@@ -518,6 +587,10 @@ mod tests {
             document_id: "document-1".into(),
             base_revision: 7,
             base_hash: document::hash("before"),
+            before_hash: document::hash(&"a".repeat(600 * 1024)),
+            after_hash: document::hash(&"b".repeat(600 * 1024)),
+            before_bytes: 600 * 1024,
+            after_bytes: 600 * 1024,
             before: "a".repeat(600 * 1024),
             after: "b".repeat(600 * 1024),
         };
@@ -527,8 +600,33 @@ mod tests {
         let encoded = serde_json::to_vec(&response).unwrap();
         assert!(encoded.len() < 1024);
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["proposal"]["before_bytes"],
+            serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["proposal"]
+                ["before_bytes"],
             600 * 1024
         );
+    }
+
+    #[test]
+    fn snapshot_response_accounts_for_json_escaping() {
+        let text = "\u{1}".repeat(MAX_MESSAGE);
+        let document = document::Document::new(&text);
+        let snapshot = document.snapshot(
+            &text,
+            None,
+            false,
+            document::ExternalState::Unknown,
+            true,
+            true,
+            false,
+        );
+        let response = bounded_snapshot_response(snapshot);
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(encoded.len() <= MAX_MESSAGE);
+        let Response::Ok { snapshot } = response else {
+            panic!("bounded snapshot should fit in the transport");
+        };
+        assert!(snapshot.text.len() < text.len());
+        assert!(!snapshot.content_complete);
+        assert_eq!(snapshot.buffer_hash, document::hash(&snapshot.text));
     }
 }
