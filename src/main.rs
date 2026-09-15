@@ -758,13 +758,13 @@ impl RavnPad {
                         });
                         continue;
                     }
-                    #[cfg(windows)]
+                    #[cfg(any(target_os = "macos", windows))]
                     let proposed = self.document.propose_with_line_endings(
                         patch.clone(),
                         &self.text,
                         self.native_uses_crlf(),
                     );
-                    #[cfg(not(windows))]
+                    #[cfg(not(any(target_os = "macos", windows)))]
                     let proposed = self.document.propose(patch.clone(), &self.text);
                     match proposed {
                         Ok(proposal) => {

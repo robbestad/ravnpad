@@ -144,7 +144,7 @@ impl Document {
         }
     }
 
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
     pub fn propose(&mut self, patch: Patch, current_text: &str) -> Result<&Proposal, Error> {
         self.propose_with_normalization(patch, current_text, None)
     }
