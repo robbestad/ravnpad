@@ -1660,6 +1660,14 @@ impl eframe::App for RavnPad {
                 if ui.button(t.settings_menu).clicked() {
                     self.settings_open = true;
                 }
+                ui.menu_button(t.agent_menu, |ui| {
+                    if self.agent.is_some() {
+                        ui.add_enabled(false, egui::Button::new(t.agent_enabled));
+                    } else if ui.button(t.enable_agent).clicked() {
+                        self.start_agent();
+                        ui.close();
+                    }
+                });
                 ui.add_enabled_ui(self.large.is_none(), |ui| {
                     if ui.button(t.find).clicked() {
                         self.find_open = true;
