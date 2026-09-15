@@ -317,7 +317,7 @@ impl Native {
         let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
         if let Ok(value) = std::str::from_utf8(bytes) {
             let normalized = value.replace("\r\n", "\n");
-            let value = if self.app.saved_text.contains("\r\n") {
+            let value = if self.app.native_uses_crlf() {
                 normalized.replace('\n', "\r\n")
             } else {
                 normalized

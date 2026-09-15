@@ -762,7 +762,7 @@ impl RavnPad {
                     let proposed = self.document.propose_with_line_endings(
                         patch.clone(),
                         &self.text,
-                        self.saved_text.contains("\r\n"),
+                        self.native_uses_crlf(),
                     );
                     #[cfg(not(windows))]
                     let proposed = self.document.propose(patch.clone(), &self.text);
@@ -807,6 +807,15 @@ impl RavnPad {
         self.cache_valid = false;
         self.spell_dirty = true;
         Ok(text)
+    }
+
+    #[cfg(windows)]
+    fn native_uses_crlf(&self) -> bool {
+        if self.path.is_some() {
+            self.saved_text.contains("\r\n")
+        } else {
+            self.text.contains("\r\n")
+        }
     }
 
     fn reject_agent_proposal(&mut self, operation_id: &str) {
@@ -2324,6 +2333,23 @@ mod tests {
             pending_opens: std::collections::VecDeque::new(),
         };
         app
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_newline_mode_uses_live_text_without_a_saved_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path());
+        app.text = "restored\r\ndraft".into();
+        assert!(app.native_uses_crlf());
+
+        app.path = Some(dir.path().join("note.txt"));
+        app.saved_text = "saved\ntext".into();
+        assert!(!app.native_uses_crlf());
+
+        app.saved_text = "saved\r\ntext".into();
+        app.text = "no newline".into();
+        assert!(app.native_uses_crlf());
     }
 
     #[test]
