@@ -80,14 +80,15 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain_path"
           security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
 
-          identity="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
-          if [ -z "$identity" ]; then
+          identity_hash="$(security find-identity -v -p codesigning "$keychain_path" | awk '/"Developer ID Application:/ { print $2; exit }')"
+          if [ -z "$identity_hash" ]; then
             echo "No Developer ID Application identity was imported"
             exit 1
           fi
 
-          echo "MACOS_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "MACOS_SIGNING_IDENTITY=$identity_hash" >> "$GITHUB_ENV"
           echo "MACOS_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
 
       - name: Package Windows
@@ -120,7 +121,7 @@ jobs:
           # requests use an ad hoc identity; releases use Developer ID with
           # hardened runtime and a trusted timestamp.
           if [ -n "${MACOS_SIGNING_IDENTITY:-}" ]; then
-            sign_args=(--force --options runtime --timestamp --keychain "$MACOS_KEYCHAIN_PATH" --sign "$MACOS_SIGNING_IDENTITY")
+            sign_args=(--force --options runtime --timestamp --sign "$MACOS_SIGNING_IDENTITY")
           else
             sign_args=(--force --sign -)
           fi
