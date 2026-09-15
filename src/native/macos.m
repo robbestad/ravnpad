@@ -194,7 +194,7 @@ void rp_rebuild_menus(void) {
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
-    if (item.action==@selector(command:)) return !busy && !(item.tag==RP_ENABLE_AGENT && currentAgent) && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
+    if (item.action==@selector(command:)) return !busy && item.tag!=RP_AGENT_ENABLED && !(item.tag==RP_ENABLE_AGENT && currentAgent) && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
     if (item.action==@selector(findDocument:)) return !busy;
     if (largeDocument && item.action==@selector(performTextFinderAction:)) return NO;
     return YES;

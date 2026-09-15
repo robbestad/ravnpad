@@ -1,9 +1,12 @@
 use std::{
-    fs, io,
+    fs::{self, OpenOptions},
+    io,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
+
+use fs2::FileExt as _;
 
 pub enum Command {
     Snapshot(Option<String>),
@@ -40,16 +43,44 @@ impl Recovery {
             let Some(dir) = dir else {
                 return;
             };
-            let result = fs::create_dir_all(&dir).and_then(|_| {
+            if let Err(error) = fs::create_dir_all(&dir) {
+                let _ = events.send(Event::Failed(error));
+                ctx.request_repaint();
+                return;
+            }
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = dir.join(format!("{}-{unique}.txt", std::process::id()));
+            let lock_path = recovery_lock(&path);
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .and_then(|file| {
+                    file.lock_exclusive()?;
+                    Ok(file)
+                });
+            let lock = match lock {
+                Ok(lock) => lock,
+                Err(error) => {
+                    let _ = events.send(Event::Failed(error));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            let result = (|| {
                 fs::read_dir(&dir)?
                     .map(|entry| entry.map(|e| e.path()))
                     .collect::<io::Result<Vec<_>>>()
-            });
+            })();
             let event = match result {
                 Ok(mut paths) => {
                     paths.retain(|p| {
-                        p.extension().is_some_and(|e| e == "txt")
-                            && recovery_owner(p).is_none_or(|pid| !process_is_alive(pid))
+                        p.extension().is_some_and(|e| e == "txt") && !recovery_is_live(p)
                     });
                     paths.sort();
                     use std::io::Read;
@@ -77,11 +108,6 @@ impl Recovery {
             };
             let _ = events.send(event);
             ctx.request_repaint();
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let path = dir.join(format!("{}-{unique}.txt", std::process::id()));
             while let Ok(command) = commands.recv() {
                 let result = match command {
                     Command::Snapshot(Some(text)) => {
@@ -93,7 +119,7 @@ impl Recovery {
                         Err(e) => Event::ReadFailed(e),
                     })),
                     Command::Stop => break,
-                    Command::Delete(path) => remove(&path).map(|_| None),
+                    Command::Delete(path) => remove_recovery(&path).map(|_| None),
                 };
                 match result {
                     Ok(Some(event)) => {
@@ -107,6 +133,9 @@ impl Recovery {
                     _ => {}
                 }
             }
+            let _ = fs2::FileExt::unlock(&lock);
+            drop(lock);
+            let _ = remove(&lock_path);
         });
         Self {
             tx,
@@ -116,47 +145,30 @@ impl Recovery {
     }
 }
 
-fn recovery_owner(path: &std::path::Path) -> Option<u32> {
-    path.file_stem()?.to_str()?.split_once('-')?.0.parse().ok()
+fn recovery_lock(path: &std::path::Path) -> PathBuf {
+    path.with_extension("lock")
 }
 
-#[cfg(unix)]
-fn process_is_alive(pid: u32) -> bool {
-    unsafe extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-    }
-    let Ok(pid) = i32::try_from(pid) else {
+fn recovery_is_live(path: &std::path::Path) -> bool {
+    let Ok(lock) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(recovery_lock(path))
+    else {
         return false;
     };
-    (unsafe { kill(pid, 0) == 0 }) || {
-        io::Error::last_os_error()
-            .raw_os_error()
-            .is_some_and(|code| code != 3)
+    match lock.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&lock);
+            false
+        }
+        Err(_) => true,
     }
 }
 
-#[cfg(windows)]
-fn process_is_alive(pid: u32) -> bool {
-    type Handle = *mut std::ffi::c_void;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
-        fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> i32;
-        fn CloseHandle(handle: Handle) -> i32;
-    }
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const STILL_ACTIVE: u32 = 259;
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if process.is_null() {
-        return false;
-    }
-    let mut exit_code = 0;
-    let alive =
-        unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0 && exit_code == STILL_ACTIVE;
-    unsafe {
-        CloseHandle(process);
-    }
-    alive
+fn remove_recovery(path: &std::path::Path) -> io::Result<()> {
+    remove(path)?;
+    remove(&recovery_lock(path))
 }
 fn remove(path: &std::path::Path) -> io::Result<()> {
     match fs::remove_file(path) {
@@ -205,14 +217,6 @@ mod tests {
                 .send(Command::Snapshot(Some("æøå\nunsaved".into())))
                 .unwrap();
         }
-        let snapshot = fs::read_dir(dir.path())
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let crashed = dir.path().join("2147483647-1.txt");
-        fs::rename(snapshot, &crashed).unwrap();
         let worker = Recovery::start_in(ctx, Some(dir.path().to_owned()));
         let paths = available(&worker);
         assert_eq!(paths.len(), 1);
@@ -230,8 +234,24 @@ mod tests {
     #[test]
     fn snapshots_from_a_live_window_are_not_offered() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(format!("{}-1.txt", std::process::id()));
-        fs::write(path, "still being edited").unwrap();
+        let live = Recovery::start_in(
+            eframe::egui::Context::default(),
+            Some(dir.path().to_owned()),
+        );
+        assert!(available(&live).is_empty());
+        live.tx
+            .send(Command::Snapshot(Some("still being edited".into())))
+            .unwrap();
+        for _ in 0..100 {
+            if fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().extension().is_some_and(|ext| ext == "txt"))
+            {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
         let worker = Recovery::start_in(
             eframe::egui::Context::default(),
             Some(dir.path().to_owned()),
