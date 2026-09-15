@@ -707,16 +707,57 @@ impl Native {
 }
 fn proposal_preview(before: &str, after: &str) -> String {
     const LIMIT: usize = 4_000;
-    fn truncate(value: &str) -> &str {
-        if value.len() <= LIMIT {
-            value
-        } else {
-            let mut end = LIMIT;
-            while !value.is_char_boundary(end) { end -= 1; }
-            &value[..end]
+
+    fn boundary_at_or_before(value: &str, mut index: usize) -> usize {
+        index = index.min(value.len());
+        while !value.is_char_boundary(index) {
+            index -= 1;
         }
+        index
     }
-    format!("Before:\n{}\n\nAfter:\n{}", truncate(before), truncate(after))
+
+    fn excerpt(value: &str, changed_start: usize, changed_end: usize) -> String {
+        const CONTEXT: usize = 512;
+        let start = boundary_at_or_before(value, changed_start.saturating_sub(CONTEXT));
+        let end = boundary_at_or_before(value, changed_end.saturating_add(CONTEXT));
+        let end = end.max(changed_end).min(value.len());
+        let leading = if start > 0 { "…\n" } else { "" };
+        let trailing = if end < value.len() { "\n…" } else { "" };
+        let available = LIMIT.saturating_sub(leading.len() + trailing.len());
+        if end - start <= available {
+            return format!("{leading}{}{trailing}", &value[start..end]);
+        }
+
+        let half = available.saturating_sub("\n… omitted …\n".len()) / 2;
+        let head_end = boundary_at_or_before(value, start.saturating_add(half));
+        let tail_start = boundary_at_or_before(value, end.saturating_sub(half));
+        format!(
+            "{leading}{}\n… omitted …\n{}{trailing}",
+            &value[start..head_end],
+            &value[tail_start..end]
+        )
+    }
+
+    let prefix = before
+        .chars()
+        .zip(after.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(character, _)| character.len_utf8())
+        .sum::<usize>();
+    let suffix = before[prefix..]
+        .chars()
+        .rev()
+        .zip(after[prefix..].chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(character, _)| character.len_utf8())
+        .sum::<usize>();
+    let before_end = before.len().saturating_sub(suffix);
+    let after_end = after.len().saturating_sub(suffix);
+    format!(
+        "Before:\n{}\n\nAfter:\n{}",
+        excerpt(before, prefix, before_end),
+        excerpt(after, prefix, after_end)
+    )
 }
 fn info(title: &str, message: &str, ok: &str) {
     rfd::MessageDialog::new()
@@ -725,4 +766,28 @@ fn info(title: &str, message: &str, ok: &str) {
         .set_level(rfd::MessageLevel::Info)
         .set_buttons(rfd::MessageButtons::OkCustom(ok.to_owned()))
         .show();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proposal_preview;
+
+    #[test]
+    fn proposal_preview_centers_a_late_change() {
+        let before = format!("{}before{}", "a".repeat(8_000), "z".repeat(8_000));
+        let after = format!("{}after{}", "a".repeat(8_000), "z".repeat(8_000));
+        let preview = proposal_preview(&before, &after);
+        assert!(preview.contains("before"));
+        assert!(preview.contains("after"));
+        assert!(!preview.starts_with(&"a".repeat(4_000)));
+        assert!(preview.len() < 8_200);
+    }
+
+    #[test]
+    fn proposal_preview_keeps_utf8_boundaries() {
+        let prefix = "😀".repeat(2_000);
+        let preview = proposal_preview(&format!("{prefix}før"), &format!("{prefix}etter"));
+        assert!(preview.contains("før"));
+        assert!(preview.contains("etter"));
+    }
 }

@@ -652,7 +652,6 @@ impl RavnPad {
     }
 
     fn replace_document(&mut self) {
-        self.agent = None;
         self.pending_agent.clear();
         self.document.replace_document(&self.text);
     }
@@ -765,13 +764,19 @@ impl RavnPad {
                                     if !self.pending_agent.contains(&proposal.operation_id) {
                                         self.pending_agent.push_back(proposal.operation_id.clone());
                                     }
-                                    request.respond(agent::Response::PendingApproval { proposal });
+                                    request.respond(agent::Response::PendingApproval {
+                                        proposal: (&proposal).into(),
+                                    });
                                 }
                                 Some(document::ProposalStatus::Applied) => {
-                                    request.respond(agent::Response::Applied { proposal });
+                                    request.respond(agent::Response::Applied {
+                                        proposal: (&proposal).into(),
+                                    });
                                 }
                                 Some(document::ProposalStatus::Rejected) => {
-                                    request.respond(agent::Response::Rejected { proposal });
+                                    request.respond(agent::Response::Rejected {
+                                        proposal: (&proposal).into(),
+                                    });
                                 }
                                 None => unreachable!("proposal was just stored"),
                             }

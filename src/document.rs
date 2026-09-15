@@ -140,6 +140,9 @@ impl Document {
     }
 
     pub fn propose(&mut self, patch: Patch, current_text: &str) -> Result<&Proposal, Error> {
+        if patch.operation_id.is_empty() || patch.operation_id.len() > 128 {
+            return Err(Error::InvalidOperationId);
+        }
         if self.proposals.contains_key(&patch.operation_id) {
             let stored = &self.proposals[&patch.operation_id];
             if stored.patch == patch {
@@ -326,6 +329,7 @@ pub enum Error {
     OverlappingEdits { first: usize, second: usize },
     AmbiguousInsertion { first: usize, second: usize },
     MixedLineEndings,
+    InvalidOperationId,
     OperationIdReused,
     ProposalNotFound,
     ProposalRejected,

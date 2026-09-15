@@ -43,10 +43,44 @@ impl Request {
 pub enum Response {
     Document { document: Identity },
     Ok { snapshot: Snapshot },
-    PendingApproval { proposal: Proposal },
-    Applied { proposal: Proposal },
-    Rejected { proposal: Proposal },
+    PendingApproval { proposal: ProposalReceipt },
+    Applied { proposal: ProposalReceipt },
+    Rejected { proposal: ProposalReceipt },
     Error { error: ApiError },
+}
+
+/// Bounded transport representation of a proposal.
+///
+/// The editor retains the complete before/after documents for the approval UI.
+/// Returning them over IPC would duplicate the document and can exceed the
+/// one-MiB transport limit even when the request itself is small.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProposalReceipt {
+    pub proposal_id: String,
+    pub operation_id: String,
+    pub document_id: String,
+    pub base_revision: u64,
+    pub base_hash: String,
+    pub before_hash: String,
+    pub after_hash: String,
+    pub before_bytes: usize,
+    pub after_bytes: usize,
+}
+
+impl From<&Proposal> for ProposalReceipt {
+    fn from(proposal: &Proposal) -> Self {
+        Self {
+            proposal_id: proposal.proposal_id.clone(),
+            operation_id: proposal.operation_id.clone(),
+            document_id: proposal.document_id.clone(),
+            base_revision: proposal.base_revision,
+            base_hash: proposal.base_hash.clone(),
+            before_hash: document::hash(&proposal.before),
+            after_hash: document::hash(&proposal.after),
+            before_bytes: proposal.before.len(),
+            after_bytes: proposal.after.len(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -75,6 +109,7 @@ impl ApiError {
             document::Error::OverlappingEdits { .. } => "overlapping_edits",
             document::Error::AmbiguousInsertion { .. } => "ambiguous_insertion",
             document::Error::MixedLineEndings => "mixed_line_endings",
+            document::Error::InvalidOperationId => "invalid_operation_id",
             document::Error::OperationIdReused => "operation_id_reused",
             document::Error::ProposalNotFound => "proposal_not_found",
             document::Error::ProposalRejected => "proposal_rejected",
@@ -473,5 +508,27 @@ mod tests {
             request,
             Request::DocumentRead { limit: Some(5), .. }
         ));
+    }
+
+    #[test]
+    fn proposal_receipt_does_not_embed_large_documents() {
+        let proposal = Proposal {
+            proposal_id: "proposal-1".into(),
+            operation_id: "operation-1".into(),
+            document_id: "document-1".into(),
+            base_revision: 7,
+            base_hash: document::hash("before"),
+            before: "a".repeat(600 * 1024),
+            after: "b".repeat(600 * 1024),
+        };
+        let response = Response::PendingApproval {
+            proposal: (&proposal).into(),
+        };
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(encoded.len() < 1024);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["proposal"]["before_bytes"],
+            600 * 1024
+        );
     }
 }
