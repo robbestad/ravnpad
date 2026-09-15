@@ -229,6 +229,7 @@ impl Server {
         restrict_directory(&directory)?;
         let token = secure_token()?;
         let address = endpoint_address(&directory, instance_id);
+        let listener = prepare_listener(&address)?;
         let endpoint = Endpoint {
             protocol_version: document::PROTOCOL_VERSION,
             instance_id: instance_id.to_owned(),
@@ -236,11 +237,20 @@ impl Server {
             token: token.clone(),
         };
         let endpoint_path = directory.join(format!("{instance_id}.json"));
-        write_endpoint(&endpoint_path, &endpoint)?;
+        if let Err(error) = write_endpoint(&endpoint_path, &endpoint) {
+            cleanup_listener_address(&address);
+            return Err(error);
+        }
         let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new()
+        let listener_address = address.clone();
+        if let Err(error) = std::thread::Builder::new()
             .name("ravnpad-agent".into())
-            .spawn(move || listen(&address, tx, ctx))?;
+            .spawn(move || listen(listener, &listener_address, tx, ctx))
+        {
+            let _ = std::fs::remove_file(&endpoint_path);
+            cleanup_listener_address(&address);
+            return Err(error);
+        }
         Ok(Self {
             token,
             endpoint_path,
@@ -357,6 +367,31 @@ fn endpoint_address(directory: &std::path::Path, instance_id: &str) -> String {
         .into_owned()
 }
 
+#[cfg(unix)]
+type PreparedListener = std::os::unix::net::UnixListener;
+
+#[cfg(unix)]
+fn prepare_listener(address: &str) -> io::Result<PreparedListener> {
+    let _ = std::fs::remove_file(address);
+    std::os::unix::net::UnixListener::bind(address)
+}
+
+#[cfg(unix)]
+fn cleanup_listener_address(address: &str) {
+    let _ = std::fs::remove_file(address);
+}
+
+#[cfg(windows)]
+struct PreparedListener;
+
+#[cfg(windows)]
+fn prepare_listener(_address: &str) -> io::Result<PreparedListener> {
+    Ok(PreparedListener)
+}
+
+#[cfg(windows)]
+fn cleanup_listener_address(_address: &str) {}
+
 fn dispatch(bytes: &[u8], tx: &Sender<HostRequest>, ctx: &eframe::egui::Context) -> Response {
     if bytes.len() > MAX_MESSAGE {
         return Response::Error {
@@ -392,13 +427,13 @@ fn dispatch(bytes: &[u8], tx: &Sender<HostRequest>, ctx: &eframe::egui::Context)
 }
 
 #[cfg(unix)]
-fn listen(address: &str, tx: Sender<HostRequest>, ctx: eframe::egui::Context) {
+fn listen(
+    listener: PreparedListener,
+    _address: &str,
+    tx: Sender<HostRequest>,
+    ctx: eframe::egui::Context,
+) {
     use std::io::{Read as _, Write as _};
-    use std::os::unix::net::UnixListener;
-    let _ = std::fs::remove_file(address);
-    let Ok(listener) = UnixListener::bind(address) else {
-        return;
-    };
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -419,7 +454,12 @@ fn listen(address: &str, tx: Sender<HostRequest>, ctx: eframe::egui::Context) {
 }
 
 #[cfg(windows)]
-fn listen(address: &str, tx: Sender<HostRequest>, ctx: eframe::egui::Context) {
+fn listen(
+    _listener: PreparedListener,
+    address: &str,
+    tx: Sender<HostRequest>,
+    ctx: eframe::egui::Context,
+) {
     use std::os::windows::ffi::OsStrExt as _;
     type Handle = *mut std::ffi::c_void;
     #[repr(C)]
@@ -630,5 +670,14 @@ mod tests {
         assert!(snapshot.text.len() < text.len());
         assert!(!snapshot.content_complete);
         assert_eq!(snapshot.buffer_hash, document::hash(&snapshot.text));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_listener_bind_failures_are_reported_synchronously() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing_parent = directory.path().join("missing").join("agent.sock");
+        let error = prepare_listener(&missing_parent.to_string_lossy()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 }

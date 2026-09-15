@@ -1261,9 +1261,9 @@ impl RavnPad {
         }
         if opened {
             self.record_recent(&recent_path);
-            if self.agent_requested {
-                self.start_agent();
-            }
+        }
+        if self.agent_requested {
+            self.start_agent();
         }
         self.spell_dirty = true;
         self.cache_valid = false;
