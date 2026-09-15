@@ -20,6 +20,22 @@ pub enum Lang {
 }
 
 impl Lang {
+    pub fn disable_agent(self) -> &'static str {
+        match self {
+            Self::Bokmal => "Deaktiver agentmodus",
+            Self::Nynorsk => "Deaktiver agentmodus",
+            _ => "Disable agent mode",
+        }
+    }
+
+    pub fn agent_help(self) -> &'static str {
+        match self {
+            Self::Bokmal => "Slik kobler agenten til …",
+            Self::Nynorsk => "Slik koplar agenten til …",
+            _ => "How agents connect…",
+        }
+    }
+
     pub const ALL: &[Self] = &[
         Self::Bokmal,
         Self::Nynorsk,

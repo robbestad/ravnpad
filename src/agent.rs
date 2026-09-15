@@ -4,7 +4,11 @@ use crate::document::{self, Identity, Patch, Proposal, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, Sender},
+};
 use std::time::Duration;
 
 const MAX_MESSAGE: usize = 1024 * 1024;
@@ -213,6 +217,7 @@ pub struct Server {
     token: String,
     endpoint_path: PathBuf,
     listener_address: String,
+    active: Arc<AtomicBool>,
     rx: Receiver<HostRequest>,
 }
 
@@ -243,10 +248,12 @@ impl Server {
             return Err(error);
         }
         let (tx, rx) = mpsc::channel();
+        let active = Arc::new(AtomicBool::new(true));
         let listener_address = address.clone();
+        let listener_active = active.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("ravnpad-agent".into())
-            .spawn(move || listen(listener, &listener_address, tx, ctx))
+            .spawn(move || listen(listener, &listener_address, listener_active, tx, ctx))
         {
             let _ = std::fs::remove_file(&endpoint_path);
             cleanup_listener_address(&address);
@@ -256,6 +263,7 @@ impl Server {
             token,
             endpoint_path,
             listener_address: address,
+            active,
             rx,
         })
     }
@@ -272,6 +280,8 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.endpoint_path);
+        self.active.store(false, Ordering::Release);
+        wake_listener(&self.listener_address);
         cleanup_listener_address(&self.listener_address);
     }
 }
@@ -384,6 +394,11 @@ fn cleanup_listener_address(address: &str) {
     let _ = std::fs::remove_file(address);
 }
 
+#[cfg(unix)]
+fn wake_listener(address: &str) {
+    let _ = std::os::unix::net::UnixStream::connect(address);
+}
+
 #[cfg(windows)]
 type WindowsHandle = *mut std::ffi::c_void;
 
@@ -407,6 +422,15 @@ unsafe extern "system" {
         in_size: u32,
         timeout: u32,
         security: *mut SecurityAttributes,
+    ) -> WindowsHandle;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share_mode: u32,
+        security: *mut std::ffi::c_void,
+        creation: u32,
+        flags: u32,
+        template: WindowsHandle,
     ) -> WindowsHandle;
     fn ConnectNamedPipe(pipe: WindowsHandle, overlapped: *mut std::ffi::c_void) -> i32;
     fn ReadFile(
@@ -454,6 +478,10 @@ const PIPE_REJECT_REMOTE_CLIENTS: u32 = 8;
 const ERROR_PIPE_CONNECTED: i32 = 535;
 #[cfg(windows)]
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+#[cfg(windows)]
+const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
+#[cfg(windows)]
+const OPEN_EXISTING: u32 = 3;
 
 #[cfg(windows)]
 struct PreparedListener {
@@ -554,6 +582,32 @@ fn prepare_listener(address: &str) -> io::Result<PreparedListener> {
 #[cfg(windows)]
 fn cleanup_listener_address(_address: &str) {}
 
+#[cfg(windows)]
+fn wake_listener(address: &str) {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let name: Vec<u16> = std::ffi::OsStr::new(address)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let pipe = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ_WRITE,
+            0,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if pipe != INVALID_HANDLE {
+        unsafe {
+            CloseHandle(pipe);
+        }
+    }
+}
+
 fn dispatch(bytes: &[u8], tx: &Sender<HostRequest>, ctx: &eframe::egui::Context) -> Response {
     if bytes.len() > MAX_MESSAGE {
         return Response::Error {
@@ -592,11 +646,15 @@ fn dispatch(bytes: &[u8], tx: &Sender<HostRequest>, ctx: &eframe::egui::Context)
 fn listen(
     listener: PreparedListener,
     _address: &str,
+    active: Arc<AtomicBool>,
     tx: Sender<HostRequest>,
     ctx: eframe::egui::Context,
 ) {
     use std::io::{Read as _, Write as _};
     for stream in listener.incoming() {
+        if !active.load(Ordering::Acquire) {
+            break;
+        }
         let Ok(mut stream) = stream else { continue };
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let mut bytes = Vec::new();
@@ -619,11 +677,15 @@ fn listen(
 fn listen(
     mut listener: PreparedListener,
     address: &str,
+    active: Arc<AtomicBool>,
     tx: Sender<HostRequest>,
     ctx: eframe::egui::Context,
 ) {
     let mut first_pipe = Some(listener.take_pipe());
     loop {
+        if !active.load(Ordering::Acquire) {
+            break;
+        }
         let pipe = match first_pipe.take() {
             Some(pipe) => pipe,
             None => match create_named_pipe(address, listener.descriptor) {
@@ -633,6 +695,12 @@ fn listen(
         };
         let connected = unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) } != 0
             || io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED);
+        if !active.load(Ordering::Acquire) {
+            unsafe {
+                CloseHandle(pipe);
+            }
+            break;
+        }
         if connected {
             let client_tx = tx.clone();
             let client_ctx = ctx.clone();
@@ -786,6 +854,7 @@ mod tests {
             token: "test-token".into(),
             endpoint_path: endpoint_path.clone(),
             listener_address: path.to_string_lossy().into_owned(),
+            active: Arc::new(AtomicBool::new(true)),
             rx,
         };
         assert!(path.exists());

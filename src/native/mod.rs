@@ -280,6 +280,8 @@ fn labels(lang: i18n::Lang) {
         (52, t.agent_menu),
         (53, t.enable_agent),
         (54, t.agent_enabled),
+        (55, lang.disable_agent()),
+        (56, lang.agent_help()),
     ] {
         labels[id] = c(value);
     }
@@ -473,6 +475,11 @@ impl Native {
                     5 => self.request(Action::Quit),
                     6 => self.request(Action::CheckUpdate),
                     53 => self.app.start_agent(),
+                    55 => self.app.stop_agent(),
+                    56 => {
+                        let message = self.app.agent_help_text();
+                        info(self.app.prefs.lang.agent_help(), &message, self.app.t().ok);
+                    }
                     7 => {
                         self.app.prefs.spellcheck = !self.app.prefs.spellcheck;
                         self.app.save_prefs();
