@@ -261,7 +261,7 @@ impl RavnPad {
         let (file_tx, file_rx) = mpsc::channel();
 
         let document = document::Document::new("", large::EDIT_LIMIT as usize);
-        let agent_requested = std::env::args().any(|arg| arg == "--enable-agent");
+        let agent_requested = std::env::args_os().any(|arg| arg == "--enable-agent");
         let mut app = Self {
             file_tx,
             file_rx,
