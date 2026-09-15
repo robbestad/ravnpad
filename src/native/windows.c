@@ -365,6 +365,12 @@ void rp_run(void) {
         copy=rp_copy_text(&length); valid=valid && copy && strcmp(copy,sample)==0; rp_free_text(copy);
         SendMessageW(editor,EM_REDO,0,0);
         copy=rp_copy_text(&length); valid=valid && copy && length>0 && copy[length-1]=='!'; rp_free_text(copy);
+        rp_replace_text("agent",5);
+        copy=rp_copy_text(&length); valid=valid && copy && strcmp(copy,"agent")==0; rp_free_text(copy);
+        SendMessageW(editor,EM_UNDO,0,0);
+        copy=rp_copy_text(&length); valid=valid && copy && length>0 && copy[length-1]=='!'; rp_free_text(copy);
+        SendMessageW(editor,EM_UNDO,0,0);
+        copy=rp_copy_text(&length); valid=valid && copy && strcmp(copy,sample)==0; rp_free_text(copy);
         rp_document("next",4,1); valid=valid && !SendMessageW(editor,EM_CANUNDO,0,0);
         // Exercise a document larger than 200 KB through real Rich Edit scrolling.
         const char *line="Scrolling must preserve this document: abcdefghijklmnopqrstuvwxyz\n";
@@ -457,6 +463,20 @@ void rp_document(const char *value,size_t length,int readonly) {
     apply_colors();
     SendMessageW(editor,EM_EMPTYUNDOBUFFER,0,0); SendMessageW(editor,EM_SETMODIFY,FALSE,0); SendMessageW(editor,EM_SETREADONLY,readonly,0);
     CHARRANGE start={0,0}; SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&start); SendMessageW(editor,EM_SCROLLCARET,0,0); updating=0;
+}
+void rp_replace_text(const char *value,size_t length) {
+    if(readonlyDocument || busy || length>INT_MAX) return;
+    int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value,(int)length,NULL,0);
+    wchar_t *w=calloc((size_t)count+1,sizeof(wchar_t)); if(!w) return;
+    if(count) MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value,(int)length,w,count);
+    updating=1;
+    SendMessageW(editor,EM_STOPGROUPTYPING,0,0);
+    SendMessageW(editor,EM_SETSEL,0,-1);
+    SendMessageW(editor,EM_REPLACESEL,TRUE,(LPARAM)w);
+    SendMessageW(editor,EM_STOPGROUPTYPING,0,0);
+    SendMessageW(editor,EM_SETMODIFY,TRUE,0);
+    updating=0;
+    free(w);
 }
 char *rp_copy_text(size_t *length) {
     GETTEXTLENGTHEX size={GTL_NUMCHARS|GTL_PRECISE,1200}; LRESULT count=SendMessageW(editor,EM_GETTEXTLENGTHEX,(WPARAM)&size,0);

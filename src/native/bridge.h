@@ -20,6 +20,8 @@ const char *rp_label(int command);
 void rp_run(void);
 int rp_smoke_test(void);
 void rp_document(const char *text, size_t length, int readonly);
+// Replace the editable buffer as one undoable action without clearing history.
+void rp_replace_text(const char *text, size_t length);
 // Returned buffer is malloc-owned by the native side; release with rp_free_text.
 char *rp_copy_text(size_t *length);
 void rp_free_text(char *text);

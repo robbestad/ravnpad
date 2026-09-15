@@ -13,8 +13,10 @@ use eframe::egui::{
     text::{CCursor, CCursorRange},
 };
 
+mod agent;
 #[cfg(windows)]
 mod associate;
+mod document;
 mod fonts;
 mod i18n;
 mod large;
@@ -96,7 +98,10 @@ fn run_egui() -> eframe::Result {
 }
 
 fn initial_path() -> Option<PathBuf> {
-    std::env::args_os().nth(1).map(PathBuf::from)
+    std::env::args_os()
+        .skip(1)
+        .find(|arg| arg != "--enable-agent")
+        .map(PathBuf::from)
 }
 
 fn apply_theme(ctx: &egui::Context, theme: prefs::ThemePref) {
@@ -169,6 +174,10 @@ struct RavnPad {
     after_save: Option<Action>,
     ctx: egui::Context,
     document_generation: u64,
+    document: document::Document,
+    agent: Option<agent::Server>,
+    agent_requested: bool,
+    pending_agent: std::collections::VecDeque<String>,
     close_requested: bool,
     text: String,
     saved_text: String,
@@ -250,6 +259,8 @@ impl RavnPad {
         let (spell_tx, spell_rx) = mpsc::channel();
         let (file_tx, file_rx) = mpsc::channel();
 
+        let document = document::Document::new("");
+        let agent_requested = std::env::args().any(|arg| arg == "--enable-agent");
         let mut app = Self {
             file_tx,
             file_rx,
@@ -261,6 +272,10 @@ impl RavnPad {
             recovered_from: None,
             ctx: ctx.clone(),
             document_generation: 0,
+            document,
+            agent: None,
+            agent_requested,
+            pending_agent: std::collections::VecDeque::new(),
             close_requested: false,
             text: String::new(),
             saved_text: String::new(),
@@ -315,6 +330,8 @@ impl RavnPad {
 
         if let Some(path) = initial {
             app.open_path(path);
+        } else if app.agent_requested {
+            app.start_agent();
         }
 
         app
@@ -602,6 +619,7 @@ impl RavnPad {
 
     fn refresh_document(&mut self) {
         if !self.cache_valid {
+            self.document.observe_text(&self.text);
             self.dirty = self.converted || self.text != self.saved_text;
             if self.dirty {
                 if self.recovery_due.is_none() {
@@ -623,6 +641,161 @@ impl RavnPad {
             self.cached_query.clone_from(&self.find_query);
         }
         self.cache_valid = true;
+    }
+
+    fn start_agent(&mut self) {
+        self.agent_requested = false;
+        match agent::Server::start(&self.document.identity().instance_id, self.ctx.clone()) {
+            Ok(server) => self.agent = Some(server),
+            Err(error) => self.error = Some(AppError::Settings(error)),
+        }
+    }
+
+    fn replace_document(&mut self) {
+        self.agent = None;
+        self.pending_agent.clear();
+        self.document.replace_document(&self.text);
+    }
+
+    fn poll_agent(&mut self) {
+        loop {
+            let request = match self.agent.as_ref().map(agent::Server::try_recv) {
+                Some(Ok(request)) => request,
+                _ => break,
+            };
+            if !self
+                .agent
+                .as_ref()
+                .is_some_and(|server| server.authorizes(&request.request))
+            {
+                request.respond(agent::Response::Error {
+                    error: agent::ApiError::new("unauthorized", "invalid or revoked access token"),
+                });
+                continue;
+            }
+            match &request.request {
+                agent::Request::DocumentStatus { .. } => {
+                    request.respond(agent::Response::Document {
+                        document: self.document.identity().clone(),
+                    });
+                }
+                agent::Request::DocumentRead {
+                    document_id,
+                    offset,
+                    limit,
+                    ..
+                } => {
+                    if self.large.is_some() {
+                        request.respond(agent::Response::Error {
+                            error: agent::ApiError::new(
+                                "content_unavailable",
+                                "large document content is not exposed through this API version",
+                            ),
+                        });
+                        continue;
+                    }
+                    if document_id != &self.document.identity().document_id {
+                        request.respond(agent::Response::Error {
+                            error: agent::ApiError::new(
+                                "wrong_document",
+                                "document is no longer open",
+                            ),
+                        });
+                        continue;
+                    }
+                    let start = offset.unwrap_or(0);
+                    let end = limit
+                        .map(|limit| start.saturating_add(limit).min(self.text.len()))
+                        .unwrap_or(self.text.len());
+                    if start > self.text.len()
+                        || !self.text.is_char_boundary(start)
+                        || !self.text.is_char_boundary(end)
+                    {
+                        request.respond(agent::Response::Error {
+                            error: agent::ApiError::new(
+                                "invalid_range",
+                                "read range is not on UTF-8 boundaries",
+                            ),
+                        });
+                        continue;
+                    }
+                    if limit.is_none() && self.text.len() > 512 * 1024 {
+                        request.respond(agent::Response::Error {
+                            error: agent::ApiError::new(
+                                "range_required",
+                                "documents over 512 KiB require offset and limit",
+                            ),
+                        });
+                        continue;
+                    }
+                    let complete = start == 0 && end == self.text.len();
+                    let mut snapshot = self.document.snapshot(
+                        &self.text,
+                        self.path.as_ref().map(|_| self.saved_text.as_str()),
+                        self.is_dirty(),
+                        document::ExternalState::Unknown,
+                        self.large.is_some() || self.text.contains('\0'),
+                        complete,
+                        true,
+                    );
+                    if !complete {
+                        snapshot.text = self.text[start..end].to_owned();
+                        snapshot.buffer_hash = document::hash(&snapshot.text);
+                        snapshot
+                            .capabilities
+                            .retain(|capability| *capability != "propose");
+                    }
+                    request.respond(agent::Response::Ok { snapshot });
+                }
+                agent::Request::DocumentPropose { patch, .. } => {
+                    if self.large.is_some() || self.text.contains('\0') {
+                        request.respond(agent::Response::Error {
+                            error: agent::ApiError::new(
+                                "read_only",
+                                "this document cannot be edited",
+                            ),
+                        });
+                        continue;
+                    }
+                    match self.document.propose(patch.clone(), &self.text) {
+                        Ok(proposal) => {
+                            let proposal = proposal.clone();
+                            match self.document.proposal_status(&proposal.operation_id) {
+                                Some(document::ProposalStatus::Pending) => {
+                                    if !self.pending_agent.contains(&proposal.operation_id) {
+                                        self.pending_agent.push_back(proposal.operation_id.clone());
+                                    }
+                                    request.respond(agent::Response::PendingApproval { proposal });
+                                }
+                                Some(document::ProposalStatus::Applied) => {
+                                    request.respond(agent::Response::Applied { proposal });
+                                }
+                                Some(document::ProposalStatus::Rejected) => {
+                                    request.respond(agent::Response::Rejected { proposal });
+                                }
+                                None => unreachable!("proposal was just stored"),
+                            }
+                        }
+                        Err(error) => request.respond(agent::Response::Error {
+                            error: agent::ApiError::document(error),
+                        }),
+                    }
+                }
+            }
+        }
+    }
+
+    fn approve_agent_proposal(&mut self, operation_id: &str) -> Result<String, document::Error> {
+        let text = self.document.approve(operation_id, &self.text)?;
+        self.text.clone_from(&text);
+        self.document.finish_approval(operation_id, &text)?;
+        self.cache_valid = false;
+        self.spell_dirty = true;
+        Ok(text)
+    }
+
+    fn reject_agent_proposal(&mut self, operation_id: &str) {
+        let _ = self.document.reject(operation_id);
     }
 
     fn is_dirty(&self) -> bool {
@@ -666,6 +839,7 @@ impl RavnPad {
                 self.document_generation += 1;
                 self.remember_position_and_save();
                 self.text.clear();
+                self.replace_document();
                 self.converted = false;
                 self.suggested_path = None;
                 self.saved_text.clear();
@@ -730,6 +904,7 @@ impl RavnPad {
                 self.remember_position_and_save();
                 self.large = None;
                 self.text = text;
+                self.replace_document();
                 self.converted = false;
                 self.suggested_path = None;
                 self.saved_text.clone_from(&self.text);
@@ -1045,6 +1220,7 @@ impl RavnPad {
                 self.suggested_path = None;
                 self.large = None;
                 self.text = text;
+                self.replace_document();
                 self.saved_text.clone_from(&self.text);
                 self.path = Some(path);
                 self.editor_scroll_y = scroll_y;
@@ -1055,6 +1231,7 @@ impl RavnPad {
                 self.converted = false;
                 self.suggested_path = None;
                 self.text.clear();
+                self.replace_document();
                 self.saved_text.clear();
                 self.large = Some(view);
                 self.path = Some(path);
@@ -1064,6 +1241,7 @@ impl RavnPad {
             Ok(large::Opened::Converted { text, txt_path }) => {
                 self.large = None;
                 self.text = text;
+                self.replace_document();
                 self.suggested_path = Some(txt_path);
                 // Conversion must never write a sibling .txt file just by opening RTF.
                 self.path = None;
@@ -1076,6 +1254,9 @@ impl RavnPad {
         }
         if opened {
             self.record_recent(&recent_path);
+            if self.agent_requested {
+                self.start_agent();
+            }
         }
         self.spell_dirty = true;
         self.cache_valid = false;
@@ -1132,6 +1313,7 @@ impl RavnPad {
                     self.suggested_path = None;
                     self.file_busy = false;
                     self.text = text;
+                    self.replace_document();
                     self.saved_text.clear();
                     self.path = None;
                     self.large = None;
@@ -1306,6 +1488,7 @@ impl eframe::App for RavnPad {
         self.poll_recovery();
         self.poll_files();
         self.refresh_document();
+        self.poll_agent();
         if self.file_busy {
             if ctx.input(|i| i.viewport().close_requested()) {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -1328,6 +1511,48 @@ impl eframe::App for RavnPad {
         }
 
         let t = self.t();
+        if let Some(operation_id) = self.pending_agent.front().cloned() {
+            let proposal = self.document.proposal(&operation_id).cloned();
+            if let Some(proposal) = proposal {
+                let mut approve = false;
+                let mut reject = false;
+                egui::Window::new("Agent suggestion")
+                    .collapsible(false)
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        ui.label(format!("Operation: {}", proposal.operation_id));
+                        ui.columns(2, |columns| {
+                            columns[0].heading("Before");
+                            egui::ScrollArea::vertical().max_height(300.0).show(
+                                &mut columns[0],
+                                |ui| {
+                                    ui.monospace(&proposal.before);
+                                },
+                            );
+                            columns[1].heading("After");
+                            egui::ScrollArea::vertical().max_height(300.0).show(
+                                &mut columns[1],
+                                |ui| {
+                                    ui.monospace(&proposal.after);
+                                },
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            approve = ui.button("Apply").clicked();
+                            reject = ui.button("Reject").clicked();
+                        });
+                    });
+                if approve {
+                    let _ = self.approve_agent_proposal(&operation_id);
+                    self.pending_agent.pop_front();
+                } else if reject {
+                    self.reject_agent_proposal(&operation_id);
+                    self.pending_agent.pop_front();
+                }
+            } else {
+                self.pending_agent.pop_front();
+            }
+        }
         let recent_files = self.prefs.recent.clone();
         let recent_labels = prefs::recent_labels(&recent_files);
         if !self.recovery_candidates.is_empty() {
@@ -2033,6 +2258,10 @@ mod tests {
             recovered_from: None,
             ctx: ctx.clone(),
             document_generation: 0,
+            document: document::Document::new(""),
+            agent: None,
+            agent_requested: false,
+            pending_agent: std::collections::VecDeque::new(),
             close_requested: false,
             text: String::new(),
             saved_text: String::new(),

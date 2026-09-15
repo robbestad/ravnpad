@@ -104,6 +104,40 @@ cargo build --release
 
 The exe is `target\release\ravnpad.exe`. Release builds hide the console.
 
+## Agent access (opt-in)
+
+Start RavnPad with `--enable-agent` to expose the current live document to local
+clients for this process only. The endpoint uses an owner-only named pipe on
+Windows (remote clients are rejected) or a private Unix socket. Closing RavnPad,
+opening another document, or restarting invalidates the document reference.
+
+```bash
+ravnpad --enable-agent notes.txt
+ravnpad-cli document status --instance INSTANCE_ID --json
+ravnpad-cli document read --instance INSTANCE_ID --document DOCUMENT_ID --json
+ravnpad-cli document propose --instance INSTANCE_ID --document DOCUMENT_ID --stdin --json < patch.json
+```
+
+Instance IDs are the names of the small endpoint files in RavnPad's `agent`
+configuration directory. `document status` resolves the current document ID.
+Direct file access is deliberately separate and read-only:
+
+```bash
+ravnpad-cli file read notes.txt --json
+```
+
+Patches use half-open UTF-8 byte ranges and must include `operation_id`,
+`document_id`, `base_revision`, `base_hash`, and an `edits` array. Every edit
+contains `start_byte`, `end_byte`, `expected_text`, and `replacement`. RavnPad
+validates the complete patch before showing a side-by-side proposal. Rejection
+changes nothing; approval updates the buffer as one undoable action and does not
+save the target file. Stale revisions, invalid UTF-8 boundaries, overlapping
+edits, ambiguous insertions, and mixed line endings are rejected.
+
+`ravnpad-mcp` exposes the same status, read, and propose operations as MCP tools
+over stdio. It writes only newline-delimited JSON-RPC messages to stdout; logs
+and diagnostics go to stderr.
+
 ## License and mark
 
 MIT. The Ravn logo is a registered trademark.

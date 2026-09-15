@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn rp_run();
     fn rp_smoke_test() -> i32;
     fn rp_document(text: *const c_char, length: usize, readonly: i32);
+    fn rp_replace_text(text: *const c_char, length: usize);
     fn rp_copy_text(length: *mut usize) -> *mut c_char;
     fn rp_free_text(text: *mut c_char);
     fn rp_state(
@@ -499,6 +500,28 @@ impl Native {
             }
         }
         self.sync_text();
+        self.app.poll_agent();
+        if let Some(operation_id) = self.app.pending_agent.pop_front() {
+            if let Some(proposal) = self.app.document.proposal(&operation_id).cloned() {
+                let preview = proposal_preview(&proposal.before, &proposal.after);
+                unsafe { rp_lock(); }
+                match confirm(
+                    "Agent suggestion",
+                    &preview,
+                    "Apply",
+                    "Reject",
+                    self.app.t().cancel,
+                ) {
+                    native_dialog::Confirm::Save => {
+                        if let Ok(text) = self.app.approve_agent_proposal(&operation_id) {
+                            unsafe { rp_replace_text(text.as_ptr().cast(), text.len()); }
+                        }
+                    }
+                    native_dialog::Confirm::Discard => self.app.reject_agent_proposal(&operation_id),
+                    native_dialog::Confirm::Cancel => self.app.pending_agent.push_back(operation_id),
+                }
+            }
+        }
         if !self.app.file_busy
             && !self.viewer_busy
             && let Some(path) = self.pending_opens.pop_front()
@@ -681,6 +704,19 @@ impl Native {
             }
         }
     }
+}
+fn proposal_preview(before: &str, after: &str) -> String {
+    const LIMIT: usize = 4_000;
+    fn truncate(value: &str) -> &str {
+        if value.len() <= LIMIT {
+            value
+        } else {
+            let mut end = LIMIT;
+            while !value.is_char_boundary(end) { end -= 1; }
+            &value[..end]
+        }
+    }
+    format!("Before:\n{}\n\nAfter:\n{}", truncate(before), truncate(after))
 }
 fn info(title: &str, message: &str, ok: &str) {
     rfd::MessageDialog::new()
