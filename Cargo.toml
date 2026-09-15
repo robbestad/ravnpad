@@ -15,6 +15,7 @@ exclude = ["website", ".env"]
 
 
 [dependencies]
+fs2 = "0.4"
 tempfile = "3.27"
 eframe = "0.33"
 rfd = "0.15"

@@ -108,8 +108,11 @@ void rp_rebuild_menus(void) {
     item(view,L(RP_MINIMIZE),@selector(performMiniaturize:),@"m",nil,0);
     item(view,L(RP_ZOOM),@selector(performZoom:),@"",nil,0);
     NSMenu *agent = submenu(bar,L(RP_AGENT));
-    NSMenuItem *agentEntry = item(agent,L(currentAgent?RP_AGENT_ENABLED:RP_ENABLE_AGENT),@selector(command:),@"",delegate,RP_ENABLE_AGENT);
-    agentEntry.enabled=!currentAgent;
+    if(currentAgent) {
+        NSMenuItem *active = item(agent,L(RP_AGENT_ENABLED),@selector(command:),@"",delegate,RP_AGENT_ENABLED); active.enabled=NO;
+        command(agent,RP_DISABLE_AGENT,@"");
+    } else command(agent,RP_ENABLE_AGENT,@"");
+    [agent addItem:NSMenuItem.separatorItem]; command(agent,RP_AGENT_HELP,@"");
     NSMenu *help = submenu(bar,L(RP_HELP)); command(help,RP_UPDATE,@""); NSApp.helpMenu=help;
     NSApp.mainMenu=bar;
 }
@@ -191,7 +194,7 @@ void rp_rebuild_menus(void) {
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
-    if (item.action==@selector(command:)) return !busy && !(item.tag==RP_ENABLE_AGENT && currentAgent) && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
+    if (item.action==@selector(command:)) return !busy && item.tag!=RP_AGENT_ENABLED && !(item.tag==RP_ENABLE_AGENT && currentAgent) && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
     if (item.action==@selector(findDocument:)) return !busy;
     if (largeDocument && item.action==@selector(performTextFinderAction:)) return NO;
     return YES;

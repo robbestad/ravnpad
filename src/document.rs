@@ -318,6 +318,15 @@ impl Document {
         Ok(())
     }
 
+    pub fn reject_pending(&mut self) {
+        for stored in self.proposals.values_mut() {
+            if stored.status == ProposalStatus::Pending {
+                stored.status = ProposalStatus::Rejected;
+                stored.proposal.release_bodies();
+            }
+        }
+    }
+
     pub fn proposal(&self, operation_id: &str) -> Option<&Proposal> {
         self.proposals
             .get(operation_id)
@@ -804,6 +813,38 @@ mod tests {
         assert_eq!(repeated.after_bytes, "after".len());
         assert!(repeated.before.is_empty());
         assert!(repeated.after.is_empty());
+    }
+
+    #[test]
+    fn reject_pending_releases_every_unresolved_proposal() {
+        let mut document = Document::new("before", usize::MAX);
+        let first = patch(
+            &document,
+            "before",
+            vec![Edit {
+                start_byte: 0,
+                end_byte: 6,
+                expected_text: "before".into(),
+                replacement: "first".into(),
+            }],
+        );
+        let mut second = first.clone();
+        second.operation_id = "operation-43".into();
+        second.edits[0].replacement = "second".into();
+        document.propose(first, "before").unwrap();
+        document.propose(second, "before").unwrap();
+
+        document.reject_pending();
+
+        for operation_id in ["operation-42", "operation-43"] {
+            assert_eq!(
+                document.proposal_status(operation_id),
+                Some(ProposalStatus::Rejected)
+            );
+            let proposal = document.proposal(operation_id).unwrap();
+            assert!(proposal.before.is_empty());
+            assert!(proposal.after.is_empty());
+        }
     }
 
     #[test]

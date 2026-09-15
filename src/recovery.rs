@@ -1,9 +1,12 @@
 use std::{
-    fs, io,
+    fs::{self, OpenOptions},
+    io,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
+
+use fs2::FileExt as _;
 
 pub enum Command {
     Snapshot(Option<String>),
@@ -40,14 +43,45 @@ impl Recovery {
             let Some(dir) = dir else {
                 return;
             };
-            let result = fs::create_dir_all(&dir).and_then(|_| {
+            if let Err(error) = fs::create_dir_all(&dir) {
+                let _ = events.send(Event::Failed(error));
+                ctx.request_repaint();
+                return;
+            }
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = dir.join(format!("{}-{unique}.txt", std::process::id()));
+            let lock_path = recovery_lock(&path);
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .and_then(|file| {
+                    file.lock_exclusive()?;
+                    Ok(file)
+                });
+            let lock = match lock {
+                Ok(lock) => lock,
+                Err(error) => {
+                    let _ = events.send(Event::Failed(error));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            let result = (|| {
                 fs::read_dir(&dir)?
                     .map(|entry| entry.map(|e| e.path()))
                     .collect::<io::Result<Vec<_>>>()
-            });
+            })();
             let event = match result {
                 Ok(mut paths) => {
-                    paths.retain(|p| p.extension().is_some_and(|e| e == "txt"));
+                    paths.retain(|p| {
+                        p.extension().is_some_and(|e| e == "txt") && !recovery_is_live(p)
+                    });
                     paths.sort();
                     use std::io::Read;
                     Event::Available(
@@ -74,11 +108,6 @@ impl Recovery {
             };
             let _ = events.send(event);
             ctx.request_repaint();
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let path = dir.join(format!("{}-{unique}.txt", std::process::id()));
             while let Ok(command) = commands.recv() {
                 let result = match command {
                     Command::Snapshot(Some(text)) => {
@@ -90,7 +119,7 @@ impl Recovery {
                         Err(e) => Event::ReadFailed(e),
                     })),
                     Command::Stop => break,
-                    Command::Delete(path) => remove(&path).map(|_| None),
+                    Command::Delete(path) => remove_recovery(&path).map(|_| None),
                 };
                 match result {
                     Ok(Some(event)) => {
@@ -104,6 +133,9 @@ impl Recovery {
                     _ => {}
                 }
             }
+            let _ = fs2::FileExt::unlock(&lock);
+            drop(lock);
+            let _ = remove(&lock_path);
         });
         Self {
             tx,
@@ -111,6 +143,32 @@ impl Recovery {
             worker: Some(worker),
         }
     }
+}
+
+fn recovery_lock(path: &std::path::Path) -> PathBuf {
+    path.with_extension("lock")
+}
+
+fn recovery_is_live(path: &std::path::Path) -> bool {
+    let Ok(lock) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(recovery_lock(path))
+    else {
+        return false;
+    };
+    match lock.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&lock);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+fn remove_recovery(path: &std::path::Path) -> io::Result<()> {
+    remove(path)?;
+    remove(&recovery_lock(path))
 }
 fn remove(path: &std::path::Path) -> io::Result<()> {
     match fs::remove_file(path) {
@@ -171,6 +229,34 @@ mod tests {
             Event::Restored(_, text) => assert_eq!(text, "æøå\nunsaved"),
             _ => panic!("expected restored text"),
         }
+    }
+
+    #[test]
+    fn snapshots_from_a_live_window_are_not_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = Recovery::start_in(
+            eframe::egui::Context::default(),
+            Some(dir.path().to_owned()),
+        );
+        assert!(available(&live).is_empty());
+        live.tx
+            .send(Command::Snapshot(Some("still being edited".into())))
+            .unwrap();
+        for _ in 0..100 {
+            if fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().extension().is_some_and(|ext| ext == "txt"))
+            {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let worker = Recovery::start_in(
+            eframe::egui::Context::default(),
+            Some(dir.path().to_owned()),
+        );
+        assert!(available(&worker).is_empty());
     }
     #[test]
     fn cleanup_is_ordered_after_pending_snapshot() {
