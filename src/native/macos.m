@@ -226,6 +226,17 @@ void rp_document(const char *text,size_t length,int readonly) {
     editor.editable=!readonly; [editor setSelectedRange:NSMakeRange(0,0)]; [editor scrollRangeToVisible:NSMakeRange(0,0)];
     updating=NO;
 }
+void rp_replace_text(const char *text,size_t length) {
+    NSString *value=[[NSString alloc] initWithBytes:text length:length encoding:NSUTF8StringEncoding];
+    if(!value || readonlyDocument) return;
+    updating=YES;
+    if(busy) editor.editable=YES;
+    [editor.undoManager beginUndoGrouping];
+    [editor insertText:value replacementRange:NSMakeRange(0,editor.string.length)];
+    [editor.undoManager endUndoGrouping];
+    if(busy) editor.editable=NO;
+    updating=NO;
+}
 char *rp_copy_text(size_t *length) {
     NSData *bytes=[editor.string dataUsingEncoding:NSUTF8StringEncoding]; *length=bytes.length;
     char *out=malloc(*length+1); if(out) { memcpy(out,bytes.bytes,*length); out[*length]=0; } return out;
@@ -320,6 +331,10 @@ int rp_smoke_test(void) {
         [editor.undoManager undo];
         valid=valid && [editor.string isEqualToString:S(sample)];
         [editor.undoManager redo]; valid=valid && [editor.string hasSuffix:@"!"];
+        rp_lock(); rp_replace_text("agent",5); valid=valid && [editor.string isEqualToString:@"agent"];
+        busy=NO; editor.editable=YES;
+        [editor.undoManager undo]; valid=valid && [editor.string hasSuffix:@"!"];
+        [editor.undoManager undo]; valid=valid && [editor.string isEqualToString:S(sample)];
         rp_document("next",4,1);
         valid=valid && !editor.editable && !editor.undoManager.canUndo && [editor.string isEqualToString:@"next"];
         fprintf(stderr,"Native AppKit smoke test: %s\n",valid?"PASS":"FAIL");

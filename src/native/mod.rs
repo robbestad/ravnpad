@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn rp_run();
     fn rp_smoke_test() -> i32;
     fn rp_document(text: *const c_char, length: usize, readonly: i32);
+    fn rp_replace_text(text: *const c_char, length: usize);
     fn rp_copy_text(length: *mut usize) -> *mut c_char;
     fn rp_free_text(text: *mut c_char);
     fn rp_state(
@@ -50,7 +51,11 @@ enum Event {
     FindLarge(String, bool, bool, bool),
 }
 enum SearchOutcome {
-    Found { text: String, position: u64, length: usize },
+    Found {
+        text: String,
+        position: u64,
+        length: usize,
+    },
     NotFound,
     Failed(large::FileError),
 }
@@ -222,7 +227,9 @@ pub unsafe extern "C" fn rp_find_large(
     });
     if active {
         enqueue(Event::FindLarge(
-            unsafe { CStr::from_ptr(query) }.to_string_lossy().into_owned(),
+            unsafe { CStr::from_ptr(query) }
+                .to_string_lossy()
+                .into_owned(),
             backwards != 0,
             match_case != 0,
             whole_word != 0,
@@ -310,7 +317,7 @@ impl Native {
         let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
         if let Ok(value) = std::str::from_utf8(bytes) {
             let normalized = value.replace("\r\n", "\n");
-            let value = if self.app.saved_text.contains("\r\n") {
+            let value = if self.app.native_uses_crlf() {
                 normalized.replace('\n', "\r\n")
             } else {
                 normalized
@@ -397,7 +404,9 @@ impl Native {
                 Event::Open(path) => self.pending_opens.push_back(path),
                 Event::View(fraction) => self.view(Some(fraction)),
                 Event::FindLarge(query, backwards, match_case, whole_word) => {
-                    if !self.viewer_busy && let Some(mut view) = self.app.large.take() {
+                    if !self.viewer_busy
+                        && let Some(mut view) = self.app.large.take()
+                    {
                         let same = self
                             .last_find
                             .as_ref()
@@ -408,20 +417,20 @@ impl Native {
                             .map(|(_, position)| *position)
                             .unwrap_or_else(|| view.offset());
                         let from = if same {
-                            if backwards { current } else { current.saturating_add(1) }
+                            if backwards {
+                                current
+                            } else {
+                                current.saturating_add(1)
+                            }
                         } else {
                             current
                         };
                         self.viewer_busy = true;
                         let tx = self.search_tx.clone();
                         thread::spawn(move || {
-                            let outcome = match view.find_from(
-                                &query,
-                                from,
-                                backwards,
-                                match_case,
-                                whole_word,
-                            ) {
+                            let outcome = match view
+                                .find_from(&query, from, backwards, match_case, whole_word)
+                            {
                                 Ok(Some((position, byte_length))) => {
                                     view.set_offset(position);
                                     match view.native_window(None) {
@@ -430,7 +439,11 @@ impl Native {
                                                 .get(..byte_length)
                                                 .map(|matched| matched.encode_utf16().count())
                                                 .unwrap_or_else(|| query.encode_utf16().count());
-                                            SearchOutcome::Found { text, position, length }
+                                            SearchOutcome::Found {
+                                                text,
+                                                position,
+                                                length,
+                                            }
                                         }
                                         Err(error) => SearchOutcome::Failed(error),
                                     }
@@ -499,6 +512,38 @@ impl Native {
             }
         }
         self.sync_text();
+        self.app.poll_agent();
+        if let Some(operation_id) = self.app.pending_agent.pop_front() {
+            if let Some(proposal) = self.app.document.proposal(&operation_id).cloned() {
+                let preview = proposal_preview(&proposal.before, &proposal.after, &proposal.hunks);
+                unsafe {
+                    rp_lock();
+                }
+                match confirm(
+                    "Agent suggestion",
+                    &preview,
+                    "Apply",
+                    "Reject",
+                    self.app.t().cancel,
+                ) {
+                    native_dialog::Confirm::Save => {
+                        match self.app.approve_agent_proposal(&operation_id) {
+                            Ok(text) => unsafe {
+                                rp_replace_text(text.as_ptr().cast(), text.len());
+                            },
+                            Err(error) => {
+                                self.app.reject_agent_proposal(&operation_id);
+                                self.app.error = Some(AppError::Agent(error));
+                            }
+                        }
+                    }
+                    native_dialog::Confirm::Discard => {
+                        self.app.reject_agent_proposal(&operation_id)
+                    }
+                    native_dialog::Confirm::Cancel => {}
+                }
+            }
+        }
         if !self.app.file_busy
             && !self.viewer_busy
             && let Some(path) = self.pending_opens.pop_front()
@@ -549,7 +594,11 @@ impl Native {
             self.viewer_busy = false;
             self.app.large = Some(view);
             match outcome {
-                SearchOutcome::Found { text, position, length } => {
+                SearchOutcome::Found {
+                    text,
+                    position,
+                    length,
+                } => {
                     self.last_find = Some((query, position));
                     self.viewer_text = text;
                     unsafe {
@@ -682,6 +731,40 @@ impl Native {
         }
     }
 }
+fn proposal_preview(before: &str, after: &str, hunks: &[document::ProposalHunk]) -> String {
+    fn boundary_at_or_before(value: &str, mut index: usize) -> usize {
+        index = index.min(value.len());
+        while !value.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
+    }
+
+    fn excerpt(value: &str, changed_start: usize, changed_end: usize) -> String {
+        const CONTEXT: usize = 256;
+        let start = boundary_at_or_before(value, changed_start.saturating_sub(CONTEXT));
+        let end = boundary_at_or_before(value, changed_end.saturating_add(CONTEXT));
+        let end = end.max(changed_end).min(value.len());
+        let leading = if start > 0 { "…\n" } else { "" };
+        let trailing = if end < value.len() { "\n…" } else { "" };
+        format!("{leading}{}{trailing}", &value[start..end])
+    }
+
+    hunks
+        .iter()
+        .enumerate()
+        .map(|(index, hunk)| {
+            format!(
+                "Change {}/{}\n\nBefore:\n{}\n\nAfter:\n{}",
+                index + 1,
+                hunks.len(),
+                excerpt(before, hunk.before_start, hunk.before_end),
+                excerpt(after, hunk.after_start, hunk.after_end)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n────────────────────\n\n")
+}
 fn info(title: &str, message: &str, ok: &str) {
     rfd::MessageDialog::new()
         .set_title(title)
@@ -689,4 +772,109 @@ fn info(title: &str, message: &str, ok: &str) {
         .set_level(rfd::MessageLevel::Info)
         .set_buttons(rfd::MessageButtons::OkCustom(ok.to_owned()))
         .show();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proposal_preview;
+    use crate::document::ProposalHunk;
+
+    #[test]
+    fn proposal_preview_centers_a_late_change() {
+        let before = format!("{}before{}", "a".repeat(8_000), "z".repeat(8_000));
+        let after = format!("{}after{}", "a".repeat(8_000), "z".repeat(8_000));
+        let preview = proposal_preview(
+            &before,
+            &after,
+            &[ProposalHunk {
+                before_start: 8_000,
+                before_end: 8_006,
+                after_start: 8_000,
+                after_end: 8_005,
+            }],
+        );
+        assert!(preview.contains("before"));
+        assert!(preview.contains("after"));
+        assert!(!preview.starts_with(&"a".repeat(4_000)));
+        assert!(preview.len() < 3_000);
+    }
+
+    #[test]
+    fn proposal_preview_keeps_utf8_boundaries() {
+        let prefix = "😀".repeat(2_000);
+        let before = format!("{prefix}før");
+        let after = format!("{prefix}etter");
+        let preview = proposal_preview(
+            &before,
+            &after,
+            &[ProposalHunk {
+                before_start: prefix.len(),
+                before_end: before.len(),
+                after_start: prefix.len(),
+                after_end: after.len(),
+            }],
+        );
+        assert!(preview.contains("før"));
+        assert!(preview.contains("etter"));
+    }
+
+    #[test]
+    fn proposal_preview_shows_every_separated_hunk() {
+        let gap = "x".repeat(5_000);
+        let before = format!("old-one{gap}old-two{gap}old-three");
+        let after = format!("new-one{gap}new-two{gap}new-three");
+        let hunks = ["one", "two", "three"].map(|suffix| {
+            let old = format!("old-{suffix}");
+            let new = format!("new-{suffix}");
+            let before_start = before.find(&old).unwrap();
+            let after_start = after.find(&new).unwrap();
+            ProposalHunk {
+                before_start,
+                before_end: before_start + old.len(),
+                after_start,
+                after_end: after_start + new.len(),
+            }
+        });
+        let preview = proposal_preview(&before, &after, &hunks);
+        for marker in [
+            "old-one",
+            "new-one",
+            "old-two",
+            "new-two",
+            "old-three",
+            "new-three",
+        ] {
+            assert!(preview.contains(marker), "missing {marker}");
+        }
+        assert!(preview.contains("Change 1/3"));
+        assert!(preview.contains("Change 2/3"));
+        assert!(preview.contains("Change 3/3"));
+    }
+
+    #[test]
+    fn proposal_preview_preserves_an_entire_long_hunk() {
+        let before = format!(
+            "start{}MIDDLE-OLD{}end",
+            "x".repeat(3_000),
+            "x".repeat(3_000)
+        );
+        let after = format!(
+            "start{}MIDDLE-NEW{}end",
+            "y".repeat(3_000),
+            "y".repeat(3_000)
+        );
+        let preview = proposal_preview(
+            &before,
+            &after,
+            &[ProposalHunk {
+                before_start: 0,
+                before_end: before.len(),
+                after_start: 0,
+                after_end: after.len(),
+            }],
+        );
+        assert!(preview.contains("MIDDLE-OLD"));
+        assert!(preview.contains("MIDDLE-NEW"));
+        assert!(!preview.contains("omitted"));
+    }
 }
