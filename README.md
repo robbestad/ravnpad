@@ -5,39 +5,84 @@
 <h1 align="center">RavnPad</h1>
 
 <p align="center">
-  A fast, honest notepad. Open a file, write, save. That is the whole product.
+  A fast notepad. Agents that ask first.
 </p>
 
 <p align="center">
+  <a href="https://ravnpad.com"><img src="https://img.shields.io/badge/web-ravnpad.com-1e4f9e" alt="ravnpad.com"></a>
   <a href="https://github.com/robbestad/ravnpad/releases"><img src="https://img.shields.io/github/v/release/robbestad/ravnpad?label=download" alt="GitHub release"></a>
   <a href="https://crates.io/crates/ravnpad"><img src="https://img.shields.io/crates/v/ravnpad.svg" alt="crates.io"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
 </p>
 
-Word is for documents. The web is for everything else. RavnPad is for the file in front of you: a log, a note, a dump, a `.txt` you just want to read and change.
+Open a file. Write. Save.
 
-It starts instantly, stays out of the way, and does not try to become an IDE.
+That is still the whole product.
 
-## Why people keep it
+Need an agent? Start with `--enable-agent`.
+It reads the live buffer and proposes an edit.
+You approve. It does not save.
 
-- **Native editing** — AppKit/NSTextView on macOS and Win32/Rich Edit on Windows, with system menus, selection, undo, scrolling, font selection, and Open/Save dialogs.
-- **Fifteen languages** — Bokmål, Nynorsk, English, Swedish, Danish, Icelandic, German, Dutch, French, Spanish, Italian, Portuguese, Finnish, Polish, and Czech. Follows the system language when it can.
-- **Your font** — pick a system typeface and size. Settings are remembered.
-- **Light or dark** — follow the operating-system theme automatically, or choose a theme yourself.
-- **Pick up where you left off** — recent files are one click away and reopen at the remembered reading position.
-- **Your layout** — toggle wrapping for long lines; the choice also applies to huge-file viewing.
-- **RTF in, text out** — open `.rtf` as an unsaved UTF-8 document, with a sibling `.txt` suggested when saving.
+Word is for documents. The web is for everything else. RavnPad is for the file in front of you: a log, a note, a dump, a `.txt`. It starts instantly, stays out of the way, and does not try to become an IDE.
+
+## Uncomplicated on purpose
+
+- **Open, write, save** — native AppKit on macOS, Win32 Rich Edit on Windows. System menus, undo, fonts, Find, Open/Save. No project, no sidebar, no cloud account.
+- **Fifteen languages** — follows the system language when it can. Bokmål, Nynorsk, English, Swedish, Danish, Icelandic, German, Dutch, French, Spanish, Italian, Portuguese, Finnish, Polish, and Czech.
+- **Your font and theme** — pick a system typeface and size. Light, dark, or follow the OS. Choices are remembered, including recents, reading position, and wrap.
 - **Huge files** — over 2 MB opens as a read-only windowed view. Scroll a 2 GB log without freezing.
-- **Updates itself** — on Windows and macOS, **Help → Check for updates** (release builds also check at startup).
-- **Open with** — on Windows, register for `.txt` and friends without admin rights. RavnPad does not steal Word as the default handler.
+- **RTF in, text out** — open `.rtf` as an unsaved UTF-8 document. A sibling `.txt` is suggested when you save.
+- **Updates itself** — Help → Check for updates. Release builds also check at startup on Windows and macOS.
+- **Open with** — on Windows, register for `.txt` and friends without admin rights. RavnPad does not steal Word.
+
+## Agents that ask first
+
+Most AI editors become a chat with a text area attached. RavnPad does the opposite: the notepad stays a notepad. Agent access is a flag you turn on for this process only.
+
+- **Live buffer, not the disk.** The agent reads what you are looking at, including unsaved edits. It never falls back to the file on disk.
+- **Propose. You approve.** A revision- and hash-bound patch. Side-by-side preview. Rejection changes nothing. Approval is one undoable edit and still does not save.
+- **Local, owner-only.** Windows uses an owner-only named pipe (remote clients are rejected). macOS and Linux use a private Unix socket. No cloud sidecar, no always-on daemon.
+
+```bash
+ravnpad --enable-agent notes.txt
+ravnpad-cli document status --instance INSTANCE_ID --json
+ravnpad-cli document read --instance INSTANCE_ID --document DOCUMENT_ID --json
+ravnpad-cli document propose --instance INSTANCE_ID --document DOCUMENT_ID --stdin --json < patch.json
+```
+
+Direct file access is separate and read-only:
+
+```bash
+ravnpad-cli file read notes.txt --json
+```
+
+MCP for Claude, Cursor, Codex, and friends:
+
+```json
+{
+  "mcpServers": {
+    "ravnpad": {
+      "command": "ravnpad-mcp"
+    }
+  }
+}
+```
+
+Windows zip: `ravnpad-cli.exe` and `ravnpad-mcp.exe` sit beside `ravnpad.exe`. macOS: both tools live in `RavnPad.app/Contents/Helpers/`. Instance IDs are the JSON filenames in RavnPad’s agent config directory.
+
+Paste-ready agent rules: [ravnpad.com](https://ravnpad.com/#agents).
+
+A patch must include `operation_id`, `document_id`, `base_revision`, `base_hash`, and `edits[]` with `start_byte`, `end_byte`, `expected_text`, and `replacement` (half-open UTF-8 byte ranges). Overlaps, invalid UTF-8 boundaries, mixed line endings, NUL, more than 128 edits, or more than 256 KiB of changed text are rejected. Closing RavnPad, opening another document, or restarting drops the handle.
 
 ## Get it
 
-Download Windows and macOS builds from [ravnpad.com](https://ravnpad.com), or grab a binary from [GitHub Releases](https://github.com/robbestad/ravnpad/releases).
+Download from [ravnpad.com](https://ravnpad.com) or [GitHub Releases](https://github.com/robbestad/ravnpad/releases).
 
 - Windows: unzip and run `ravnpad.exe`
 - Apple Silicon: `ravnpad-macos-aarch64.zip`
 - Intel Mac: `ravnpad-macos-x86_64.zip`
+
+macOS builds are Developer ID signed, Apple-notarized, and stapled. Drop `RavnPad.app` into Applications and open it.
 
 Or install from source:
 
@@ -45,27 +90,7 @@ Or install from source:
 cargo install ravnpad
 ```
 
-Then run `ravnpad`, or `ravnpad notes.txt`. Drag a file onto the window (Windows, and Linux on X11).
-
-### macOS first launch
-
-The app is **ad hoc signed**, not Apple-notarized. Gatekeeper may block the first open. If you trust the download from this repository, use **System Settings → Privacy & Security → Open Anyway**. See [Apple’s instructions](https://support.apple.com/en-gb/102445).
-
-If macOS says the app is damaged, check the signature before making an exception:
-
-```bash
-codesign --verify --deep --strict --verbose=4 "/Applications/RavnPad.app"
-```
-
-If verification fails, download a fresh copy and report it. Do not re-sign the file to hide a failed check.
-
-If verification succeeds, you downloaded it from GitHub Releases, and Open Anyway is unavailable, you can clear the quarantine **for this app only**:
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/RavnPad.app"
-```
-
-That does not notarize RavnPad. Do not turn Gatekeeper off.
+Then `ravnpad`, or `ravnpad notes.txt`. Drag a file onto the window (Windows, and Linux on X11).
 
 ## Shortcuts
 
@@ -80,13 +105,11 @@ That does not notarize RavnPad. Do not turn Gatekeeper off.
 
 Unsaved changes ask before New, Open, Quit, and drop. Only UTF-8 is supported.
 
-**macOS:** use ⌘ instead of Ctrl. Settings are in the application menu (⌘,); Find is ⌘F. The native font panel and spelling services are available. The app follows the system appearance.
+**macOS:** use ⌘ instead of Ctrl. Settings are in the application menu (⌘,); Find is ⌘F. Native font panel and spelling. Follows the system appearance.
 
-**Windows:** Settings contains language, font and spelling options. Ctrl+F opens the native Find dialog; Ctrl+H opens Replace. Native text services provide input-method and proofing support where installed.
+**Windows:** Settings has language, font, and spelling. Ctrl+F is Find; Ctrl+H is Replace.
 
-Native macOS and Windows builds edit files up to 16 MiB. Linux retains the measured 2 MiB edit limit for the egui interface. Larger files are read-only; the file-position slider loads a bounded window in the background, while native Find scans the complete file.
-
-Theme, recent-file, reading-position and line-wrapping preferences are remembered. File dialogs and alerts use the operating system.
+Native macOS and Windows builds edit files up to 16 MiB. Linux keeps the measured 2 MiB edit limit for the egui interface. Larger files are read-only.
 
 ## Build
 
@@ -104,69 +127,14 @@ cargo build --release
 
 The exe is `target\release\ravnpad.exe`. Release builds hide the console.
 
-## Agent access (opt-in)
-
-Start RavnPad with `--enable-agent` to expose the current live document to local
-clients for this process only. The endpoint uses an owner-only named pipe on
-Windows (remote clients are rejected) or a private Unix socket. Closing RavnPad,
-opening another document, or restarting invalidates the document reference.
-
-```bash
-ravnpad --enable-agent notes.txt
-ravnpad-cli document status --instance INSTANCE_ID --json
-ravnpad-cli document read --instance INSTANCE_ID --document DOCUMENT_ID --json
-ravnpad-cli document propose --instance INSTANCE_ID --document DOCUMENT_ID --stdin --json < patch.json
-```
-
-The Windows release archive places `ravnpad-cli.exe` and `ravnpad-mcp.exe`
-beside `ravnpad.exe`. The macOS release bundle places both command-line tools
-in `RavnPad.app/Contents/Helpers/`.
-
-Instance IDs are the names of the small endpoint files in RavnPad's `agent`
-configuration directory. `document status` resolves the current document ID.
-Direct file access is deliberately separate and read-only:
-
-```bash
-ravnpad-cli file read notes.txt --json
-```
-
-Patches use half-open UTF-8 byte ranges and must include `operation_id`,
-`document_id`, `base_revision`, `base_hash`, and an `edits` array. Every edit
-contains `start_byte`, `end_byte`, `expected_text`, and `replacement`. RavnPad
-validates the complete patch before showing a side-by-side proposal. Rejection
-changes nothing; approval updates the buffer as one undoable action and does not
-save the target file. Stale revisions, invalid UTF-8 boundaries, overlapping
-edits, ambiguous insertions, and mixed line endings are rejected.
-Patches are limited to 128 edits and 256 KiB of changed before/after text so
-every changed hunk can be shown in full in the approval preview.
-
-Read responses are shortened at a UTF-8 boundary when JSON escaping would make
-the encoded response exceed the one-MiB transport limit; `content_complete` is
-then false. Proposal results cannot contain NUL or unsupported line endings and
-must stay within the platform's editable-file limit (16 MiB on Windows/macOS,
-2 MiB elsewhere). Pending proposal bodies share twice that platform limit as a
-memory budget. Completed proposals retain only bounded receipt metadata, while
-up to 1,024 operation IDs remain available for idempotent retries during the
-document session. Once that history is full, new operation IDs are rejected
-until another document is opened.
-
-`ravnpad-mcp` exposes the same status, read, and propose operations as MCP tools
-over stdio. It writes only newline-delimited JSON-RPC messages to stdout; logs
-and diagnostics go to stderr.
-
-## License and mark
-
-MIT. The Ravn logo is a registered trademark.
-
-## Native control smoke tests
-
 ```sh
 cargo test --locked
 cargo build --release --locked
 ./target/release/ravnpad --native-smoke-test
 ```
 
-The smoke test instantiates the actual platform text control and verifies Unicode
-round trips, undo/redo, document replacement and read-only loading. It does not
-open a user document or load preferences. CI runs it on Windows and both Mac
-architectures before producing packages.
+The smoke test instantiates the actual platform text control and verifies Unicode round trips, undo/redo, document replacement, and read-only loading. It does not open a user document or load preferences. CI runs it on Windows and both Mac architectures before producing packages.
+
+## License and mark
+
+MIT. The Ravn logo is a registered trademark.
