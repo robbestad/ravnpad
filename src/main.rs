@@ -145,6 +145,7 @@ enum AppError {
     TooLargeToEdit,
     DropTooLarge,
     LaunchWindow(std::io::Error),
+    Agent(document::Error),
 }
 
 enum SpellState {
@@ -359,6 +360,7 @@ impl RavnPad {
             AppError::TooLargeToEdit => t.too_large_edit.to_owned(),
             AppError::DropTooLarge => t.drop_too_large.to_owned(),
             AppError::LaunchWindow(err) => format!("{}:\n{err}", t.cannot_open_window),
+            AppError::Agent(err) => format!("Agent suggestion could not be applied:\n{err}"),
         }
     }
 
@@ -1548,7 +1550,10 @@ impl eframe::App for RavnPad {
                         });
                     });
                 if approve {
-                    let _ = self.approve_agent_proposal(&operation_id);
+                    if let Err(error) = self.approve_agent_proposal(&operation_id) {
+                        self.reject_agent_proposal(&operation_id);
+                        self.error = Some(AppError::Agent(error));
+                    }
                     self.pending_agent.pop_front();
                 } else if reject {
                     self.reject_agent_proposal(&operation_id);

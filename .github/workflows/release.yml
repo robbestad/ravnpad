@@ -61,14 +61,22 @@ jobs:
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path target/release/ravnpad.exe -DestinationPath ${{ matrix.artifact }}
+        run: |
+          Compress-Archive -Path target/release/ravnpad.exe,target/release/ravnpad-cli.exe,target/release/ravnpad-mcp.exe -DestinationPath ${{ matrix.artifact }}
+          $verify = Join-Path $env:RUNNER_TEMP "ravnpad-package"
+          Expand-Archive -Path ${{ matrix.artifact }} -DestinationPath $verify
+          @("ravnpad.exe", "ravnpad-cli.exe", "ravnpad-mcp.exe") | ForEach-Object {
+            if (-not (Test-Path -LiteralPath (Join-Path $verify $_))) { throw "Missing packaged binary: $_" }
+          }
 
       - name: Package macOS
         if: runner.os == 'macOS'
         run: |
           mkdir -p RavnPad.app/Contents/MacOS RavnPad.app/Contents/Resources
           cp target/release/ravnpad RavnPad.app/Contents/MacOS/ravnpad
-          chmod +x RavnPad.app/Contents/MacOS/ravnpad
+          cp target/release/ravnpad-cli RavnPad.app/Contents/MacOS/ravnpad-cli
+          cp target/release/ravnpad-mcp RavnPad.app/Contents/MacOS/ravnpad-mcp
+          chmod +x RavnPad.app/Contents/MacOS/ravnpad RavnPad.app/Contents/MacOS/ravnpad-cli RavnPad.app/Contents/MacOS/ravnpad-mcp
           cp packaging/macos/Info.plist RavnPad.app/Contents/Info.plist
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" -c "Set :CFBundleVersion $version" RavnPad.app/Contents/Info.plist
@@ -85,6 +93,8 @@ jobs:
           ditto -x -k "${{ matrix.artifact }}" "$verify_dir"
           codesign --verify --deep --strict --verbose=4 "$verify_dir/RavnPad.app"
           test -x "$verify_dir/RavnPad.app/Contents/MacOS/ravnpad"
+          test -x "$verify_dir/RavnPad.app/Contents/MacOS/ravnpad-cli"
+          test -x "$verify_dir/RavnPad.app/Contents/MacOS/ravnpad-mcp"
           test -f "$verify_dir/RavnPad.app/Contents/Resources/RavnPad.icns"
           rm -rf "$verify_dir"
 
@@ -120,5 +130,6 @@ jobs:
 
             - **Windows:** unzip and run `ravnpad.exe`
             - **macOS:** unzip `RavnPad.app`. The app is ad hoc signed, but not Apple-notarized. Gatekeeper may block the first launch. See the [macOS installation instructions](https://github.com/robbestad/ravnpad/blob/${{ github.ref_name }}/README.md#macos) for manual approval and troubleshooting.
+            - **Agent tools:** Windows archives include `ravnpad-cli.exe` and `ravnpad-mcp.exe`; macOS bundles include both tools under `RavnPad.app/Contents/MacOS/`.
 
             Apple Silicon: `ravnpad-macos-aarch64.zip`. Intel: `ravnpad-macos-x86_64.zip`.

@@ -1,6 +1,7 @@
 [package]
 name = "ravnpad"
 version = "1.3.8"
+default-run = "ravnpad"
 edition = "2024"
 rust-version = "1.88"
 description = "A simple UTF-8 notepad"

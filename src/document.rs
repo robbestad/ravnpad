@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const RANGE_UNIT: &str = "utf8-byte";
 const MAX_PROPOSAL_HISTORY: usize = 1024;
+const MAX_PATCH_EDITS: usize = 128;
 const MAX_PROPOSAL_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RETAINED_PROPOSAL_BYTES: usize = 2 * MAX_PROPOSAL_RESULT_BYTES;
 
@@ -159,6 +160,7 @@ impl Document {
         }
         self.validate_base(&patch, current_text)?;
         let result = apply_edits(current_text, &patch.edits)?;
+        let hunks = proposal_hunks(&patch.edits);
         if result.contains('\0') {
             return Err(Error::EmbeddedNul);
         }
@@ -186,6 +188,7 @@ impl Document {
             after_hash: hash(&result),
             before_bytes: current_text.len(),
             after_bytes: result.len(),
+            hunks,
             before: current_text.to_owned(),
             after: result,
         };
@@ -336,6 +339,7 @@ pub struct Proposal {
     pub after_hash: String,
     pub before_bytes: usize,
     pub after_bytes: usize,
+    pub hunks: Vec<ProposalHunk>,
     pub before: String,
     pub after: String,
 }
@@ -344,7 +348,16 @@ impl Proposal {
     fn release_bodies(&mut self) {
         self.before = String::new();
         self.after = String::new();
+        self.hunks.clear();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ProposalHunk {
+    pub before_start: usize,
+    pub before_end: usize,
+    pub after_start: usize,
+    pub after_end: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -356,6 +369,28 @@ struct StoredProposal {
 
 fn patch_fingerprint(patch: &Patch) -> [u8; 32] {
     Sha256::digest(serde_json::to_vec(patch).expect("patch serialization cannot fail")).into()
+}
+
+fn proposal_hunks(edits: &[Edit]) -> Vec<ProposalHunk> {
+    let mut order: Vec<_> = (0..edits.len()).collect();
+    order.sort_by_key(|&index| (edits[index].start_byte, edits[index].end_byte));
+    let mut removed = 0;
+    let mut added = 0;
+    order
+        .into_iter()
+        .map(|index| {
+            let edit = &edits[index];
+            let after_start = edit.start_byte - removed + added;
+            removed += edit.end_byte - edit.start_byte;
+            added += edit.replacement.len();
+            ProposalHunk {
+                before_start: edit.start_byte,
+                before_end: edit.end_byte,
+                after_start,
+                after_end: after_start + edit.replacement.len(),
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -372,6 +407,7 @@ pub enum Error {
     StaleRevision { expected: u64, actual: u64 },
     HashMismatch,
     EmptyPatch,
+    TooManyEdits,
     InvalidRange { edit: usize },
     InvalidUtf8Boundary { edit: usize },
     ExpectedTextMismatch { edit: usize },
@@ -407,6 +443,9 @@ impl std::error::Error for Error {}
 pub fn apply_edits(text: &str, edits: &[Edit]) -> Result<String, Error> {
     if edits.is_empty() {
         return Err(Error::EmptyPatch);
+    }
+    if edits.len() > MAX_PATCH_EDITS {
+        return Err(Error::TooManyEdits);
     }
     for (index, edit) in edits.iter().enumerate() {
         if edit.start_byte > edit.end_byte || edit.end_byte > text.len() {
@@ -480,6 +519,66 @@ mod tests {
             },
         ];
         assert_eq!(apply_edits(text, &edits).unwrap(), "1 two 3");
+    }
+
+    #[test]
+    fn proposal_hunks_track_each_edit_in_before_and_after_text() {
+        let text = "one two three";
+        let mut document = Document::new(text);
+        let proposal = document
+            .propose(
+                patch(
+                    &document,
+                    text,
+                    vec![
+                        Edit {
+                            start_byte: 0,
+                            end_byte: 3,
+                            expected_text: "one".into(),
+                            replacement: "first".into(),
+                        },
+                        Edit {
+                            start_byte: 8,
+                            end_byte: 13,
+                            expected_text: "three".into(),
+                            replacement: "3".into(),
+                        },
+                    ],
+                ),
+                text,
+            )
+            .unwrap();
+        assert_eq!(
+            proposal.hunks,
+            vec![
+                ProposalHunk {
+                    before_start: 0,
+                    before_end: 3,
+                    after_start: 0,
+                    after_end: 5,
+                },
+                ProposalHunk {
+                    before_start: 8,
+                    before_end: 13,
+                    after_start: 10,
+                    after_end: 11,
+                },
+            ]
+        );
+        assert_eq!(proposal.after, "first two 3");
+    }
+
+    #[test]
+    fn patch_edit_count_is_bounded_for_reviewability() {
+        let edits = (0..=MAX_PATCH_EDITS)
+            .map(|_| Edit {
+                start_byte: 0,
+                end_byte: 0,
+                expected_text: String::new(),
+                replacement: "x".into(),
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(apply_edits("", &edits), Err(Error::TooManyEdits)));
     }
 
     #[test]

@@ -118,6 +118,10 @@ ravnpad-cli document read --instance INSTANCE_ID --document DOCUMENT_ID --json
 ravnpad-cli document propose --instance INSTANCE_ID --document DOCUMENT_ID --stdin --json < patch.json
 ```
 
+The Windows release archive places `ravnpad-cli.exe` and `ravnpad-mcp.exe`
+beside `ravnpad.exe`. The macOS release bundle places both command-line tools
+in `RavnPad.app/Contents/MacOS/`.
+
 Instance IDs are the names of the small endpoint files in RavnPad's `agent`
 configuration directory. `document status` resolves the current document ID.
 Direct file access is deliberately separate and read-only:
@@ -133,6 +137,8 @@ validates the complete patch before showing a side-by-side proposal. Rejection
 changes nothing; approval updates the buffer as one undoable action and does not
 save the target file. Stale revisions, invalid UTF-8 boundaries, overlapping
 edits, ambiguous insertions, and mixed line endings are rejected.
+Patches are limited to 128 edits so every changed hunk can be shown in the
+approval preview.
 
 Read responses are shortened at a UTF-8 boundary when JSON escaping would make
 the encoded response exceed the one-MiB transport limit; `content_complete` is

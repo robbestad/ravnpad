@@ -103,6 +103,7 @@ impl ApiError {
             document::Error::StaleRevision { .. } => "stale_revision",
             document::Error::HashMismatch => "hash_mismatch",
             document::Error::EmptyPatch => "empty_patch",
+            document::Error::TooManyEdits => "too_many_edits",
             document::Error::InvalidRange { .. } => "invalid_range",
             document::Error::InvalidUtf8Boundary { .. } => "invalid_utf8_boundary",
             document::Error::ExpectedTextMismatch { .. } => "expected_text_mismatch",
@@ -591,6 +592,7 @@ mod tests {
             after_hash: document::hash(&"b".repeat(600 * 1024)),
             before_bytes: 600 * 1024,
             after_bytes: 600 * 1024,
+            hunks: Vec::new(),
             before: "a".repeat(600 * 1024),
             after: "b".repeat(600 * 1024),
         };
@@ -600,8 +602,7 @@ mod tests {
         let encoded = serde_json::to_vec(&response).unwrap();
         assert!(encoded.len() < 1024);
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["proposal"]
-                ["before_bytes"],
+            serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["proposal"]["before_bytes"],
             600 * 1024
         );
     }
