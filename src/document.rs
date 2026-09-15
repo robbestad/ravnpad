@@ -144,7 +144,29 @@ impl Document {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn propose(&mut self, patch: Patch, current_text: &str) -> Result<&Proposal, Error> {
+        self.propose_with_normalization(patch, current_text, None)
+    }
+
+    /// Store a proposal using the newline convention exposed by a native editor.
+    /// The fingerprint still covers the client's original patch, so idempotency
+    /// does not treat differently encoded requests as the same operation.
+    pub fn propose_with_line_endings(
+        &mut self,
+        patch: Patch,
+        current_text: &str,
+        crlf: bool,
+    ) -> Result<&Proposal, Error> {
+        self.propose_with_normalization(patch, current_text, Some(crlf))
+    }
+
+    fn propose_with_normalization(
+        &mut self,
+        patch: Patch,
+        current_text: &str,
+        crlf: Option<bool>,
+    ) -> Result<&Proposal, Error> {
         if patch.operation_id.is_empty() || patch.operation_id.len() > 128 {
             return Err(Error::InvalidOperationId);
         }
@@ -160,8 +182,19 @@ impl Document {
             return Err(Error::ProposalHistoryFull);
         }
         self.validate_base(&patch, current_text)?;
-        let result = apply_edits(current_text, &patch.edits)?;
-        let hunks = proposal_hunks(&patch.edits);
+        let mut edits = patch.edits.clone();
+        if let Some(crlf) = crlf {
+            for edit in &mut edits {
+                let normalized = edit.replacement.replace("\r\n", "\n");
+                edit.replacement = if crlf {
+                    normalized.replace('\n', "\r\n")
+                } else {
+                    normalized
+                };
+            }
+        }
+        let result = apply_edits(current_text, &edits)?;
+        let hunks = proposal_hunks(&edits);
         if result.contains('\0') {
             return Err(Error::EmbeddedNul);
         }
@@ -171,7 +204,7 @@ impl Document {
         if result.len() > self.edit_limit {
             return Err(Error::ResultTooLarge);
         }
-        let preview_changed_bytes = patch.edits.iter().fold(0usize, |total, edit| {
+        let preview_changed_bytes = edits.iter().fold(0usize, |total, edit| {
             total
                 .saturating_add(edit.expected_text.len())
                 .saturating_add(edit.replacement.len())
@@ -799,6 +832,50 @@ mod tests {
             limited.propose(too_large, "a"),
             Err(Error::ResultTooLarge)
         ));
+    }
+
+    #[test]
+    fn native_proposals_use_the_editors_line_ending_convention() {
+        let mut lf_document = Document::new("before", usize::MAX);
+        let lf_request = patch(
+            &lf_document,
+            "before",
+            vec![Edit {
+                start_byte: 0,
+                end_byte: 6,
+                expected_text: "before".into(),
+                replacement: "one\r\ntwo".into(),
+            }],
+        );
+        let lf_proposal = lf_document
+            .propose_with_line_endings(lf_request.clone(), "before", false)
+            .unwrap();
+        assert_eq!(lf_proposal.after, "one\ntwo");
+        assert_eq!(lf_proposal.after_hash, hash("one\ntwo"));
+
+        let mut changed_encoding = lf_request;
+        changed_encoding.edits[0].replacement = "one\ntwo".into();
+        assert!(matches!(
+            lf_document.propose_with_line_endings(changed_encoding, "before", false),
+            Err(Error::OperationIdReused)
+        ));
+
+        let mut crlf_document = Document::new("before", usize::MAX);
+        let crlf_request = patch(
+            &crlf_document,
+            "before",
+            vec![Edit {
+                start_byte: 0,
+                end_byte: 6,
+                expected_text: "before".into(),
+                replacement: "one\ntwo".into(),
+            }],
+        );
+        let crlf_proposal = crlf_document
+            .propose_with_line_endings(crlf_request, "before", true)
+            .unwrap();
+        assert_eq!(crlf_proposal.after, "one\r\ntwo");
+        assert_eq!(crlf_proposal.after_hash, hash("one\r\ntwo"));
     }
 
     #[test]

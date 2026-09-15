@@ -758,7 +758,15 @@ impl RavnPad {
                         });
                         continue;
                     }
-                    match self.document.propose(patch.clone(), &self.text) {
+                    #[cfg(windows)]
+                    let proposed = self.document.propose_with_line_endings(
+                        patch.clone(),
+                        &self.text,
+                        self.saved_text.contains("\r\n"),
+                    );
+                    #[cfg(not(windows))]
+                    let proposed = self.document.propose(patch.clone(), &self.text);
+                    match proposed {
                         Ok(proposal) => {
                             let proposal = proposal.clone();
                             match self.document.proposal_status(&proposal.operation_id) {
