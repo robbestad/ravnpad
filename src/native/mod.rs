@@ -540,9 +540,7 @@ impl Native {
                     native_dialog::Confirm::Discard => {
                         self.app.reject_agent_proposal(&operation_id)
                     }
-                    native_dialog::Confirm::Cancel => {
-                        self.app.pending_agent.push_back(operation_id)
-                    }
+                    native_dialog::Confirm::Cancel => {}
                 }
             }
         }

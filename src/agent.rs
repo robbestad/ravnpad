@@ -212,6 +212,7 @@ pub struct Endpoint {
 pub struct Server {
     token: String,
     endpoint_path: PathBuf,
+    listener_address: String,
     rx: Receiver<HostRequest>,
 }
 
@@ -254,6 +255,7 @@ impl Server {
         Ok(Self {
             token,
             endpoint_path,
+            listener_address: address,
             rx,
         })
     }
@@ -270,6 +272,7 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.endpoint_path);
+        cleanup_listener_address(&self.listener_address);
     }
 }
 
@@ -382,11 +385,168 @@ fn cleanup_listener_address(address: &str) {
 }
 
 #[cfg(windows)]
-struct PreparedListener;
+type WindowsHandle = *mut std::ffi::c_void;
 
 #[cfg(windows)]
-fn prepare_listener(_address: &str) -> io::Result<PreparedListener> {
-    Ok(PreparedListener)
+#[repr(C)]
+struct SecurityAttributes {
+    length: u32,
+    descriptor: *mut std::ffi::c_void,
+    inherit: i32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CreateNamedPipeW(
+        name: *const u16,
+        open_mode: u32,
+        pipe_mode: u32,
+        max_instances: u32,
+        out_size: u32,
+        in_size: u32,
+        timeout: u32,
+        security: *mut SecurityAttributes,
+    ) -> WindowsHandle;
+    fn ConnectNamedPipe(pipe: WindowsHandle, overlapped: *mut std::ffi::c_void) -> i32;
+    fn ReadFile(
+        file: WindowsHandle,
+        buffer: *mut u8,
+        size: u32,
+        read: *mut u32,
+        overlapped: *mut std::ffi::c_void,
+    ) -> i32;
+    fn WriteFile(
+        file: WindowsHandle,
+        buffer: *const u8,
+        size: u32,
+        written: *mut u32,
+        overlapped: *mut std::ffi::c_void,
+    ) -> i32;
+    fn FlushFileBuffers(file: WindowsHandle) -> i32;
+    fn DisconnectNamedPipe(pipe: WindowsHandle) -> i32;
+    fn CloseHandle(handle: WindowsHandle) -> i32;
+    fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+#[cfg(windows)]
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text: *const u16,
+        revision: u32,
+        descriptor: *mut *mut std::ffi::c_void,
+        size: *mut u32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+const INVALID_HANDLE: WindowsHandle = -1_isize as WindowsHandle;
+#[cfg(windows)]
+const PIPE_ACCESS_DUPLEX: u32 = 3;
+#[cfg(windows)]
+const PIPE_TYPE_MESSAGE: u32 = 4;
+#[cfg(windows)]
+const PIPE_READMODE_MESSAGE: u32 = 2;
+#[cfg(windows)]
+const PIPE_REJECT_REMOTE_CLIENTS: u32 = 8;
+#[cfg(windows)]
+const ERROR_PIPE_CONNECTED: i32 = 535;
+
+#[cfg(windows)]
+struct PreparedListener {
+    pipe: WindowsHandle,
+    descriptor: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+unsafe impl Send for PreparedListener {}
+
+#[cfg(windows)]
+impl PreparedListener {
+    fn take_pipe(&mut self) -> WindowsHandle {
+        std::mem::replace(&mut self.pipe, std::ptr::null_mut())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PreparedListener {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.pipe.is_null() && self.pipe != INVALID_HANDLE {
+                CloseHandle(self.pipe);
+            }
+            if !self.descriptor.is_null() {
+                LocalFree(self.descriptor);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn create_named_pipe(
+    address: &str,
+    descriptor: *mut std::ffi::c_void,
+) -> io::Result<WindowsHandle> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let name: Vec<u16> = std::ffi::OsStr::new(address)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut security = SecurityAttributes {
+        length: std::mem::size_of::<SecurityAttributes>() as u32,
+        descriptor,
+        inherit: 0,
+    };
+    let pipe = unsafe {
+        CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            MAX_MESSAGE as u32,
+            MAX_MESSAGE as u32,
+            5_000,
+            &mut security,
+        )
+    };
+    if pipe == INVALID_HANDLE {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(pipe)
+    }
+}
+
+#[cfg(windows)]
+fn prepare_listener(address: &str) -> io::Result<PreparedListener> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let sddl: Vec<u16> = std::ffi::OsStr::new("D:P(A;;GA;;;OW)")
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut descriptor = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    match create_named_pipe(address, descriptor) {
+        Ok(pipe) => Ok(PreparedListener { pipe, descriptor }),
+        Err(error) => {
+            unsafe {
+                LocalFree(descriptor);
+            }
+            Err(error)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -455,107 +615,20 @@ fn listen(
 
 #[cfg(windows)]
 fn listen(
-    _listener: PreparedListener,
+    mut listener: PreparedListener,
     address: &str,
     tx: Sender<HostRequest>,
     ctx: eframe::egui::Context,
 ) {
-    use std::os::windows::ffi::OsStrExt as _;
-    type Handle = *mut std::ffi::c_void;
-    #[repr(C)]
-    struct SecurityAttributes {
-        length: u32,
-        descriptor: *mut std::ffi::c_void,
-        inherit: i32,
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreateNamedPipeW(
-            name: *const u16,
-            open_mode: u32,
-            pipe_mode: u32,
-            max_instances: u32,
-            out_size: u32,
-            in_size: u32,
-            timeout: u32,
-            security: *mut SecurityAttributes,
-        ) -> Handle;
-        fn ConnectNamedPipe(pipe: Handle, overlapped: *mut std::ffi::c_void) -> i32;
-        fn ReadFile(
-            file: Handle,
-            buffer: *mut u8,
-            size: u32,
-            read: *mut u32,
-            overlapped: *mut std::ffi::c_void,
-        ) -> i32;
-        fn WriteFile(
-            file: Handle,
-            buffer: *const u8,
-            size: u32,
-            written: *mut u32,
-            overlapped: *mut std::ffi::c_void,
-        ) -> i32;
-        fn FlushFileBuffers(file: Handle) -> i32;
-        fn DisconnectNamedPipe(pipe: Handle) -> i32;
-        fn CloseHandle(handle: Handle) -> i32;
-        fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-    }
-    #[link(name = "advapi32")]
-    unsafe extern "system" {
-        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            text: *const u16,
-            revision: u32,
-            descriptor: *mut *mut std::ffi::c_void,
-            size: *mut u32,
-        ) -> i32;
-    }
-    const INVALID_HANDLE: Handle = -1_isize as Handle;
-    const PIPE_ACCESS_DUPLEX: u32 = 3;
-    const PIPE_TYPE_MESSAGE: u32 = 4;
-    const PIPE_READMODE_MESSAGE: u32 = 2;
-    const PIPE_REJECT_REMOTE_CLIENTS: u32 = 8;
-    const ERROR_PIPE_CONNECTED: i32 = 535;
-    let name: Vec<u16> = std::ffi::OsStr::new(address)
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let sddl: Vec<u16> = std::ffi::OsStr::new("D:P(A;;GA;;;OW)")
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let mut descriptor = std::ptr::null_mut();
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        )
-    } == 0
-    {
-        return;
-    }
-    let mut security = SecurityAttributes {
-        length: std::mem::size_of::<SecurityAttributes>() as u32,
-        descriptor,
-        inherit: 0,
-    };
+    let mut first_pipe = Some(listener.take_pipe());
     loop {
-        let pipe = unsafe {
-            CreateNamedPipeW(
-                name.as_ptr(),
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                MAX_MESSAGE as u32,
-                MAX_MESSAGE as u32,
-                5_000,
-                &mut security,
-            )
+        let pipe = match first_pipe.take() {
+            Some(pipe) => pipe,
+            None => match create_named_pipe(address, listener.descriptor) {
+                Ok(pipe) => pipe,
+                Err(_) => break,
+            },
         };
-        if pipe == INVALID_HANDLE {
-            break;
-        }
         let connected = unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) } != 0
             || io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED);
         if connected {
@@ -592,9 +665,6 @@ fn listen(
             DisconnectNamedPipe(pipe);
             CloseHandle(pipe);
         }
-    }
-    unsafe {
-        LocalFree(descriptor);
     }
 }
 
@@ -679,5 +749,49 @@ mod tests {
         let missing_parent = directory.path().join("missing").join("agent.sock");
         let error = prepare_listener(&missing_parent.to_string_lossy()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn server_drop_removes_unix_listener_address() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.sock");
+        let listener = prepare_listener(&path.to_string_lossy()).unwrap();
+        let endpoint_path = directory.path().join("agent.json");
+        std::fs::write(&endpoint_path, b"{}\n").unwrap();
+        let (_tx, rx) = mpsc::channel();
+        let server = Server {
+            token: "test-token".into(),
+            endpoint_path: endpoint_path.clone(),
+            listener_address: path.to_string_lossy().into_owned(),
+            rx,
+        };
+        assert!(path.exists());
+        assert!(endpoint_path.exists());
+        drop(server);
+        assert!(!path.exists());
+        assert!(!endpoint_path.exists());
+        drop(listener);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_listener_is_created_during_prepare() {
+        let address = format!(
+            r"\\.\pipe\ravnpad-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let listener = prepare_listener(&address).unwrap();
+        assert!(!listener.pipe.is_null());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_listener_creation_failures_are_reported_synchronously() {
+        assert!(prepare_listener("not-a-named-pipe-address").is_err());
     }
 }
