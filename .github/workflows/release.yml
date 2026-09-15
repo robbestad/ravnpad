@@ -87,7 +87,8 @@ jobs:
           codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad
           codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad-cli
           codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad-mcp
-          codesign --force --sign - RavnPad.app
+          # Re-sign recursively for consistent ad hoc signatures across runner versions.
+          codesign --force --deep --sign - RavnPad.app
           codesign --verify --deep --strict --verbose=4 RavnPad.app
           ditto -c -k --sequesterRsrc --keepParent RavnPad.app "${{ matrix.artifact }}"
 
