@@ -128,8 +128,7 @@ fn process_is_alive(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
-    unsafe { kill(pid, 0) == 0 }
-    || {
+    (unsafe { kill(pid, 0) == 0 }) || {
         io::Error::last_os_error()
             .raw_os_error()
             .is_some_and(|code| code != 3)
