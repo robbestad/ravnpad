@@ -809,7 +809,7 @@ impl RavnPad {
         Ok(text)
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "macos", windows))]
     fn native_uses_crlf(&self) -> bool {
         if self.path.is_some() {
             self.saved_text.contains("\r\n")
@@ -2335,7 +2335,7 @@ mod tests {
         app
     }
 
-    #[cfg(windows)]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn native_newline_mode_uses_live_text_without_a_saved_baseline() {
         let dir = tempfile::tempdir().unwrap();
