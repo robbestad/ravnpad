@@ -56,10 +56,34 @@ fn save_with_sync(
     tmp.as_file().sync_all()?;
     // Check immediately before replacement, after the potentially slow write.
     check(&target)?;
-    replace(tmp, &target)?;
+    if let Err(error) = replace(tmp, &target) {
+        // Some macOS network file systems can report EACCES after the server
+        // has already committed the rename. Only accept that ambiguous result
+        // when the complete destination can be read back byte-for-byte.
+        #[cfg(target_os = "macos")]
+        if error.kind() == io::ErrorKind::PermissionDenied
+            && fs::read(&target).is_ok_and(|current| current == bytes)
+        {
+            return Ok(SaveOutcome {
+                durability_warning: None,
+            });
+        }
+        return Err(error);
+    }
     Ok(SaveOutcome {
-        durability_warning: sync(parent).err(),
+        durability_warning: sync(parent).err().and_then(directory_sync_warning),
     })
+}
+
+fn directory_sync_warning(error: io::Error) -> Option<io::Error> {
+    // SMB shares mounted by macOS commonly allow atomic replacement but deny
+    // fsync on the directory handle. The file and its own fsync have already
+    // succeeded, so this is a provider limitation rather than a failed save.
+    #[cfg(target_os = "macos")]
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        return None;
+    }
+    Some(error)
 }
 
 #[cfg(test)]
@@ -81,6 +105,22 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"new");
         // A caller that accepts the committed baseline can save again normally.
         save_checked(&path, b"next", Some(b"new")).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_network_directory_permission_error_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note");
+        let result = save_with_sync(
+            &path,
+            b"saved",
+            |_| Ok(()),
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        )
+        .unwrap();
+        assert!(result.durability_warning.is_none());
+        assert_eq!(fs::read(path).unwrap(), b"saved");
     }
 
     #[cfg(target_os = "macos")]
