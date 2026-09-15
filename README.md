@@ -37,7 +37,7 @@ Word is for documents. The web is for everything else. RavnPad is for the file i
 
 ## Agents that ask first
 
-Most AI editors become a chat with a text area attached. RavnPad does the opposite: the notepad stays a notepad. Agent access is a flag you turn on for this process only.
+Most AI editors become a chat with a text area attached. RavnPad does the opposite: the notepad stays a notepad. Turn on agent access for the current process from **Agent → Enable agent mode**, or start RavnPad with `--enable-agent`.
 
 - **Live buffer, not the disk.** The agent reads what you are looking at, including unsaved edits. It never falls back to the file on disk.
 - **Propose. You approve.** A revision- and hash-bound patch. Side-by-side preview. Rejection changes nothing. Approval is one undoable edit and still does not save.

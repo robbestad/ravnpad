@@ -27,6 +27,7 @@ unsafe extern "C" {
     fn rp_preferences(font: *const c_char, points: f64, spell: i32, language: i32);
     fn rp_wrap(enabled: i32);
     fn rp_theme(preference: i32);
+    fn rp_agent(enabled: i32);
     fn rp_read_position() -> f64;
     fn rp_restore_position(fraction: f64);
     fn rp_rebuild_menus();
@@ -276,6 +277,9 @@ fn labels(lang: i18n::Lang) {
         (49, t.theme_dark),
         (50, t.no_matches),
         (51, t.whole_word),
+        (52, t.agent_menu),
+        (53, t.enable_agent),
+        (54, t.agent_enabled),
     ] {
         labels[id] = c(value);
     }
@@ -468,6 +472,7 @@ impl Native {
                     4 => self.request(Action::SaveAs),
                     5 => self.request(Action::Quit),
                     6 => self.request(Action::CheckUpdate),
+                    53 => self.app.start_agent(),
                     7 => {
                         self.app.prefs.spellcheck = !self.app.prefs.spellcheck;
                         self.app.save_prefs();
@@ -722,6 +727,7 @@ impl Native {
                 prefs::ThemePref::Light => 1,
                 prefs::ThemePref::Dark => 2,
             });
+            rp_agent(self.app.agent.is_some() as i32);
             if self.app.close_requested {
                 self.app.recovery.finish();
                 rp_close();

@@ -8,7 +8,7 @@ static NSScrollView *scroll;
 static NSTextView *editor;
 static NSTextField *statusLabel;
 static NSSlider *filePosition;
-static BOOL updating, busy, readonlyDocument, largeDocument, smokeTest, terminationPending;
+static BOOL updating, busy, readonlyDocument, largeDocument, smokeTest, terminationPending, currentAgent;
 static NSString *largeQuery;
 static BOOL largeMatchCase, largeWholeWord;
 static NSString *currentFont;
@@ -107,6 +107,9 @@ void rp_rebuild_menus(void) {
     NSMenu *view = submenu(bar, L(RP_WINDOW)); NSApp.windowsMenu = view;
     item(view,L(RP_MINIMIZE),@selector(performMiniaturize:),@"m",nil,0);
     item(view,L(RP_ZOOM),@selector(performZoom:),@"",nil,0);
+    NSMenu *agent = submenu(bar,L(RP_AGENT));
+    NSMenuItem *agentEntry = item(agent,L(currentAgent?RP_AGENT_ENABLED:RP_ENABLE_AGENT),@selector(command:),@"",delegate,RP_ENABLE_AGENT);
+    agentEntry.enabled=!currentAgent;
     NSMenu *help = submenu(bar,L(RP_HELP)); command(help,RP_UPDATE,@""); NSApp.helpMenu=help;
     NSApp.mainMenu=bar;
 }
@@ -188,7 +191,7 @@ void rp_rebuild_menus(void) {
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
-    if (item.action==@selector(command:)) return !busy && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
+    if (item.action==@selector(command:)) return !busy && !(item.tag==RP_ENABLE_AGENT && currentAgent) && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
     if (item.action==@selector(findDocument:)) return !busy;
     if (largeDocument && item.action==@selector(performTextFinderAction:)) return NO;
     return YES;
@@ -282,6 +285,12 @@ void rp_theme(int preference) {
     else if(preference==2) appearance=[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
     NSApp.appearance=appearance;
     if(delegate.settings.visible) [delegate.themes selectItemAtIndex:preference];
+}
+void rp_agent(int enabled) {
+    BOOL active=enabled!=0;
+    if(currentAgent==active) return;
+    currentAgent=active;
+    rp_rebuild_menus();
 }
 double rp_read_position(void) {
     [editor.layoutManager ensureLayoutForTextContainer:editor.textContainer];
