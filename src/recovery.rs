@@ -47,7 +47,10 @@ impl Recovery {
             });
             let event = match result {
                 Ok(mut paths) => {
-                    paths.retain(|p| p.extension().is_some_and(|e| e == "txt"));
+                    paths.retain(|p| {
+                        p.extension().is_some_and(|e| e == "txt")
+                            && recovery_owner(p).is_none_or(|pid| !process_is_alive(pid))
+                    });
                     paths.sort();
                     use std::io::Read;
                     Event::Available(
@@ -112,6 +115,50 @@ impl Recovery {
         }
     }
 }
+
+fn recovery_owner(path: &std::path::Path) -> Option<u32> {
+    path.file_stem()?.to_str()?.split_once('-')?.0.parse().ok()
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    unsafe { kill(pid, 0) == 0 }
+    || {
+        io::Error::last_os_error()
+            .raw_os_error()
+            .is_some_and(|code| code != 3)
+    }
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    type Handle = *mut std::ffi::c_void;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
+        fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return false;
+    }
+    let mut exit_code = 0;
+    let alive =
+        unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0 && exit_code == STILL_ACTIVE;
+    unsafe {
+        CloseHandle(process);
+    }
+    alive
+}
 fn remove(path: &std::path::Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -159,6 +206,14 @@ mod tests {
                 .send(Command::Snapshot(Some("æøå\nunsaved".into())))
                 .unwrap();
         }
+        let snapshot = fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let crashed = dir.path().join("2147483647-1.txt");
+        fs::rename(snapshot, &crashed).unwrap();
         let worker = Recovery::start_in(ctx, Some(dir.path().to_owned()));
         let paths = available(&worker);
         assert_eq!(paths.len(), 1);
@@ -171,6 +226,18 @@ mod tests {
             Event::Restored(_, text) => assert_eq!(text, "æøå\nunsaved"),
             _ => panic!("expected restored text"),
         }
+    }
+
+    #[test]
+    fn snapshots_from_a_live_window_are_not_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{}-1.txt", std::process::id()));
+        fs::write(path, "still being edited").unwrap();
+        let worker = Recovery::start_in(
+            eframe::egui::Context::default(),
+            Some(dir.path().to_owned()),
+        );
+        assert!(available(&worker).is_empty());
     }
     #[test]
     fn cleanup_is_ordered_after_pending_snapshot() {
