@@ -82,8 +82,11 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" -c "Set :CFBundleVersion $version" RavnPad.app/Contents/Info.plist
           test -f target/release/ravnpad.icns
           cp target/release/ravnpad.icns RavnPad.app/Contents/Resources/RavnPad.icns
-          # Sign the complete bundle after all files have been placed.
+          # Sign nested executables before sealing the complete bundle.
           # "-" is a free ad hoc identity, not a Developer ID certificate.
+          codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad
+          codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad-cli
+          codesign --force --sign - RavnPad.app/Contents/MacOS/ravnpad-mcp
           codesign --force --sign - RavnPad.app
           codesign --verify --deep --strict --verbose=4 RavnPad.app
           ditto -c -k --sequesterRsrc --keepParent RavnPad.app "${{ matrix.artifact }}"
