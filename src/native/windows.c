@@ -476,11 +476,17 @@ void rp_replace_text(const char *value,size_t length) {
     int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value,(int)length,NULL,0);
     wchar_t *w=calloc((size_t)count+1,sizeof(wchar_t)); if(!w) return;
     if(count) MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value,(int)length,w,count);
+    CHARRANGE selection={0}; SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&selection);
     updating=1;
     if(busy) SendMessageW(editor,EM_SETREADONLY,FALSE,0);
     SendMessageW(editor,EM_STOPGROUPTYPING,0,0);
     SendMessageW(editor,EM_SETSEL,0,-1);
     SendMessageW(editor,EM_REPLACESEL,TRUE,(LPARAM)w);
+    LONG end=(LONG)SendMessageW(editor,WM_GETTEXTLENGTH,0,0);
+    if(selection.cpMin>end) selection.cpMin=end;
+    if(selection.cpMax>end) selection.cpMax=end;
+    SendMessageW(editor,EM_EXSETSEL,0,(LPARAM)&selection);
+    selectionAnchor=-1;
     SendMessageW(editor,EM_STOPGROUPTYPING,0,0);
     SendMessageW(editor,EM_SETMODIFY,TRUE,0);
     if(busy) SendMessageW(editor,EM_SETREADONLY,TRUE,0);

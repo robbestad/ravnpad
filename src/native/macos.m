@@ -242,11 +242,15 @@ void rp_document(const char *text,size_t length,int readonly) {
 void rp_replace_text(const char *text,size_t length) {
     NSString *value=[[NSString alloc] initWithBytes:text length:length encoding:NSUTF8StringEncoding];
     if(!value || readonlyDocument) return;
+    NSRange selection=editor.selectedRange;
     updating=YES;
     if(busy) editor.editable=YES;
     [editor.undoManager beginUndoGrouping];
     [editor insertText:value replacementRange:NSMakeRange(0,editor.string.length)];
     [editor.undoManager endUndoGrouping];
+    selection.location=MIN(selection.location,editor.string.length);
+    selection.length=MIN(selection.length,editor.string.length-selection.location);
+    [editor setSelectedRange:selection];
     if(busy) editor.editable=NO;
     updating=NO;
 }

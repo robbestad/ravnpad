@@ -818,7 +818,10 @@ impl RavnPad {
                     request.respond(agent::bounded_snapshot_response(snapshot));
                 }
                 agent::Request::DocumentPropose { patch, .. } => {
-                    if self.file_busy {
+                    if self.file_busy
+                        || matches!(self.update, UpdateUi::Downloading)
+                        || self.restarting
+                    {
                         request.respond(agent::Response::Error {
                             error: agent::ApiError::new(
                                 "busy",
