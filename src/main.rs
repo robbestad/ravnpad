@@ -821,6 +821,7 @@ impl RavnPad {
                     if self.file_busy
                         || matches!(self.update, UpdateUi::Downloading)
                         || self.restarting
+                        || self.close_requested
                         || self.confirm.is_some()
                     {
                         request.respond(agent::Response::Error {
