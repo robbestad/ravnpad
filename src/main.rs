@@ -723,7 +723,8 @@ impl RavnPad {
         self.document.replace_document(&self.text);
     }
 
-    fn poll_agent(&mut self) {
+    fn poll_agent(&mut self) -> bool {
+        let mut text_changed = false;
         loop {
             let request = match self.agent.as_ref().map(agent::Server::try_recv) {
                 Some(Ok(request)) => request,
@@ -839,12 +840,20 @@ impl RavnPad {
                             let proposal = proposal.clone();
                             match self.document.proposal_status(&proposal.operation_id) {
                                 Some(document::ProposalStatus::Pending) => {
-                                    if !self.pending_agent.contains(&proposal.operation_id) {
-                                        self.pending_agent.push_back(proposal.operation_id.clone());
+                                    match self.approve_agent_proposal(&proposal.operation_id) {
+                                        Ok(_) => {
+                                            text_changed = true;
+                                            request.respond(agent::Response::Applied {
+                                                proposal: (&proposal).into(),
+                                            });
+                                        }
+                                        Err(error) => {
+                                            self.reject_agent_proposal(&proposal.operation_id);
+                                            request.respond(agent::Response::Error {
+                                                error: agent::ApiError::document(error),
+                                            });
+                                        }
                                     }
-                                    request.respond(agent::Response::PendingApproval {
-                                        proposal: (&proposal).into(),
-                                    });
                                 }
                                 Some(document::ProposalStatus::Applied) => {
                                     request.respond(agent::Response::Applied {
@@ -866,6 +875,7 @@ impl RavnPad {
                 }
             }
         }
+        text_changed
     }
 
     fn approve_agent_proposal(&mut self, operation_id: &str) -> Result<String, document::Error> {

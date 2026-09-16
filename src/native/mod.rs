@@ -548,7 +548,11 @@ impl Native {
             }
         }
         self.sync_text();
-        self.app.poll_agent();
+        if self.app.poll_agent() {
+            unsafe {
+                rp_replace_text(self.app.text.as_ptr().cast(), self.app.text.len());
+            }
+        }
         if let Some(operation_id) = self.app.pending_agent.pop_front() {
             if let Some(proposal) = self.app.document.proposal(&operation_id).cloned() {
                 let preview = proposal_preview(&proposal.before, &proposal.after, &proposal.hunks);

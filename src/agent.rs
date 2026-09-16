@@ -51,7 +51,6 @@ impl Request {
 pub enum Response {
     Document { document: Identity },
     Ok { snapshot: Snapshot },
-    PendingApproval { proposal: ProposalReceipt },
     Applied { proposal: ProposalReceipt },
     Rejected { proposal: ProposalReceipt },
     Error { error: ApiError },
@@ -59,8 +58,8 @@ pub enum Response {
 
 /// Bounded transport representation of a proposal.
 ///
-/// Pending proposals retain their complete before/after documents for the
-/// approval UI. Returning them over IPC would duplicate the document and can
+/// Proposals retain their complete before/after documents while being applied.
+/// Returning them over IPC would duplicate the document and can
 /// exceed the one-MiB transport limit even when the request itself is small.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProposalReceipt {
@@ -120,7 +119,6 @@ impl ApiError {
             document::Error::MixedLineEndings => "mixed_line_endings",
             document::Error::EmbeddedNul => "embedded_nul",
             document::Error::ResultTooLarge => "result_too_large",
-            document::Error::ProposalPreviewTooLarge => "proposal_preview_too_large",
             document::Error::InvalidOperationId => "invalid_operation_id",
             document::Error::OperationIdReused => "operation_id_reused",
             document::Error::ProposalHistoryFull => "proposal_history_full",
@@ -848,7 +846,7 @@ mod tests {
             before: "a".repeat(600 * 1024),
             after: "b".repeat(600 * 1024),
         };
-        let response = Response::PendingApproval {
+        let response = Response::Applied {
             proposal: (&proposal).into(),
         };
         let encoded = serde_json::to_vec(&response).unwrap();
