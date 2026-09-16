@@ -25,16 +25,71 @@ fn save_with_check(
 
 fn sync_directory(parent: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    fs::File::open(parent)?.sync_all()?;
+    sync_directory_with(
+        parent,
+        |path| fs::File::open(path),
+        fs::File::sync_all,
+        |directory| {
+            #[cfg(target_os = "macos")]
+            return is_macos_smb(directory);
+            #[cfg(not(target_os = "macos"))]
+            false
+        },
+    )?;
     #[cfg(not(unix))]
     let _ = parent;
     Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory_with<T>(
+    parent: &Path,
+    open: impl FnOnce(&Path) -> io::Result<T>,
+    sync: impl FnOnce(&T) -> io::Result<()>,
+    is_supported_network_provider: impl FnOnce(&T) -> bool,
+) -> io::Result<()> {
+    // Opening and syncing are deliberately separate: an opening failure says
+    // nothing about whether this is a provider with a known fsync limitation.
+    let directory = open(parent)?;
+    match sync(&directory) {
+        #[cfg(target_os = "macos")]
+        Err(error)
+            if error.kind() == io::ErrorKind::PermissionDenied
+                && is_supported_network_provider(&directory) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_smb(directory: &fs::File) -> bool {
+    use std::{ffi::CStr, mem::MaybeUninit, os::fd::AsRawFd};
+
+    let mut info = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(directory.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let info = unsafe { info.assume_init() };
+    let file_system = unsafe { CStr::from_ptr(info.f_fstypename.as_ptr()) };
+    file_system.to_bytes() == b"smbfs"
 }
 
 fn save_with_sync(
     path: &Path,
     bytes: &[u8],
     check: impl FnOnce(&Path) -> io::Result<()>,
+    sync: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<SaveOutcome> {
+    save_with_operations(path, bytes, check, replace, sync)
+}
+
+fn save_with_operations(
+    path: &Path,
+    bytes: &[u8],
+    check: impl FnOnce(&Path) -> io::Result<()>,
+    replace_operation: impl FnOnce(tempfile::NamedTempFile, &Path) -> io::Result<()>,
     sync: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<SaveOutcome> {
     let target = if path.is_symlink() {
@@ -56,7 +111,7 @@ fn save_with_sync(
     tmp.as_file().sync_all()?;
     // Check immediately before replacement, after the potentially slow write.
     check(&target)?;
-    if let Err(error) = replace(tmp, &target) {
+    if let Err(error) = replace_operation(tmp, &target) {
         // Some macOS network file systems can report EACCES after the server
         // has already committed the rename. Only accept that ambiguous result
         // when the complete destination can be read back byte-for-byte.
@@ -64,26 +119,17 @@ fn save_with_sync(
         if error.kind() == io::ErrorKind::PermissionDenied
             && fs::read(&target).is_ok_and(|current| current == bytes)
         {
-            return Ok(SaveOutcome {
-                durability_warning: None,
-            });
+            // The replacement committed despite the reported error. Continue
+            // through the normal directory durability check below.
+        } else {
+            return Err(error);
         }
+        #[cfg(not(target_os = "macos"))]
         return Err(error);
     }
     Ok(SaveOutcome {
-        durability_warning: sync(parent).err().and_then(directory_sync_warning),
+        durability_warning: sync(parent).err(),
     })
-}
-
-fn directory_sync_warning(error: io::Error) -> Option<io::Error> {
-    // SMB shares mounted by macOS commonly allow atomic replacement but deny
-    // fsync on the directory handle. The file and its own fsync have already
-    // succeeded, so this is a provider limitation rather than a failed save.
-    #[cfg(target_os = "macos")]
-    if error.kind() == io::ErrorKind::PermissionDenied {
-        return None;
-    }
-    Some(error)
 }
 
 #[cfg(test)]
@@ -109,18 +155,92 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_network_directory_permission_error_is_not_reported() {
+    fn ambiguous_committed_replace_still_syncs_directory() {
+        use std::cell::Cell;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("note");
-        let result = save_with_sync(
+        fs::write(&path, "old").unwrap();
+        let sync_calls = Cell::new(0);
+        let result = save_with_operations(
             &path,
             b"saved",
             |_| Ok(()),
-            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |tmp, target| {
+                tmp.persist(target).map_err(|error| error.error)?;
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            |_| {
+                sync_calls.set(sync_calls.get() + 1);
+                Err(io::Error::other("injected directory sync failure"))
+            },
         )
         .unwrap();
-        assert!(result.durability_warning.is_none());
+        assert_eq!(sync_calls.get(), 1);
+        assert!(result.durability_warning.is_some());
         assert_eq!(fs::read(path).unwrap(), b"saved");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ambiguous_replace_with_different_bytes_preserves_original_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note");
+        fs::write(&path, "old").unwrap();
+        let error = save_with_operations(
+            &path,
+            b"saved",
+            |_| Ok(()),
+            |_tmp, _target| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |_| panic!("directory sync must not run"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(path).unwrap(), b"old");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn directory_open_permission_error_is_preserved() {
+        let result = sync_directory_with::<()>(
+            Path::new("ignored"),
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |_| panic!("sync must not run"),
+            |_| true,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn directory_sync_permission_error_is_ignored_only_for_supported_provider() {
+        let denied = || Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(
+            sync_directory_with(Path::new("ignored"), |_| Ok(()), |_| denied(), |_| true).is_ok()
+        );
+        let error = sync_directory_with(Path::new("ignored"), |_| Ok(()), |_| denied(), |_| false)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires RAVNPAD_MACOS_SMB_TEST_DIR pointing to a mounted SMB share"]
+    fn saves_repeatedly_on_macos_smb_share() {
+        let root = std::env::var_os("RAVNPAD_MACOS_SMB_TEST_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("RAVNPAD_MACOS_SMB_TEST_DIR is not set");
+        let dir = tempfile::Builder::new()
+            .prefix("ravnpad-smb-test-")
+            .tempdir_in(root)
+            .unwrap();
+        let path = dir.path().join("note.txt");
+
+        save(&path, b"first").unwrap();
+        save_checked(&path, b"second", Some(b"first")).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[cfg(target_os = "macos")]
