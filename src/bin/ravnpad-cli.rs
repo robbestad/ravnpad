@@ -6,6 +6,7 @@ use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
 const MAX_MESSAGE: usize = 1024 * 1024;
+const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 struct Endpoint {
@@ -81,7 +82,7 @@ fn run() -> Result<(), CliError> {
             let text = std::fs::read_to_string(path)
                 .map_err(|error| CliError::unavailable(format!("cannot read {path}: {error}")))?;
             print_json(&FileRead {
-                protocol_version: 1,
+                protocol_version: PROTOCOL_VERSION,
                 path: Path::new(path),
                 content_complete: true,
                 range_unit: "utf8-byte",
@@ -210,7 +211,7 @@ fn endpoint(instance: &str) -> Result<Endpoint, CliError> {
 }
 
 fn ensure_instance(endpoint: &Endpoint, expected: &str) -> Result<(), CliError> {
-    if endpoint.protocol_version != 1 {
+    if endpoint.protocol_version != PROTOCOL_VERSION {
         return Err(CliError::protocol("unsupported protocol version"));
     }
     if endpoint.instance_id != expected {

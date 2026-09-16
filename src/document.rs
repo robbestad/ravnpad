@@ -10,11 +10,10 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const RANGE_UNIT: &str = "utf8-byte";
 const MAX_PROPOSAL_HISTORY: usize = 1024;
 const MAX_PATCH_EDITS: usize = 128;
-const MAX_PREVIEW_CHANGED_BYTES: usize = 256 * 1024;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -231,14 +230,6 @@ impl Document {
         }
         if result.len() > self.edit_limit {
             return Err(Error::ResultTooLarge);
-        }
-        let preview_changed_bytes = edits.iter().fold(0usize, |total, edit| {
-            total
-                .saturating_add(edit.expected_text.len())
-                .saturating_add(edit.replacement.len())
-        });
-        if preview_changed_bytes > MAX_PREVIEW_CHANGED_BYTES {
-            return Err(Error::ProposalPreviewTooLarge);
         }
         let retained_bytes = self
             .proposals
@@ -498,7 +489,6 @@ pub enum Error {
     MixedLineEndings,
     EmbeddedNul,
     ResultTooLarge,
-    ProposalPreviewTooLarge,
     InvalidOperationId,
     OperationIdReused,
     ProposalHistoryFull,
@@ -948,8 +938,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_changes_too_large_to_preview_in_full() {
-        let mut document = Document::new("", usize::MAX);
+    fn accepts_large_changes_without_a_preview_gate() {
+        let replacement = "x".repeat(512 * 1024);
+        let mut document = Document::new("", replacement.len());
         let request = patch(
             &document,
             "",
@@ -957,13 +948,10 @@ mod tests {
                 start_byte: 0,
                 end_byte: 0,
                 expected_text: String::new(),
-                replacement: "x".repeat(MAX_PREVIEW_CHANGED_BYTES + 1),
+                replacement: replacement.clone(),
             }],
         );
-        assert!(matches!(
-            document.propose(request, ""),
-            Err(Error::ProposalPreviewTooLarge)
-        ));
+        assert_eq!(document.propose(request, "").unwrap().after, replacement);
     }
 
     #[test]

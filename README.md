@@ -20,8 +20,8 @@ Open a file. Write. Save.
 That is still the whole product.
 
 Need an agent? Start with `--enable-agent`.
-It reads the live buffer and proposes an edit.
-You approve. It does not save.
+It reads the live buffer and applies a validated edit.
+It does not save.
 
 Word is for documents. The web is for everything else. RavnPad is for the file in front of you: a log, a note, a dump, a `.txt`. It starts instantly, stays out of the way, and does not try to become an IDE.
 
@@ -39,8 +39,8 @@ Word is for documents. The web is for everything else. RavnPad is for the file i
 
 Most AI editors become a chat with a text area attached. RavnPad does the opposite: the notepad stays a notepad. Turn on agent access for the current process from **Agent → Enable agent mode**, or start RavnPad with `--enable-agent`.
 
-- **Live buffer, not the disk.** The agent reads what you are looking at, including unsaved edits. It never falls back to the file on disk.
-- **Propose. You approve.** A revision- and hash-bound patch. Side-by-side preview. Rejection changes nothing. Approval is one undoable edit and still does not save.
+- **Live buffer, not the disk.** The agent reads what you are looking at, including unsaved edits. It never falls back to the file on disk. Valid edits are applied directly; stale or ambiguous edits are rejected so the agent can reread and merge against the current text.
+- **Validated direct edits.** Every patch is bound to the document revision, buffer hash, and expected text. A valid patch becomes one undoable edit and still does not save; a stale or ambiguous patch is rejected for the agent to reread and merge.
 - **Local, owner-only.** Windows uses an owner-only named pipe (remote clients are rejected). macOS and Linux use a private Unix socket. No cloud sidecar, no always-on daemon.
 
 ```bash
@@ -72,7 +72,7 @@ Windows zip: `ravnpad-cli.exe` and `ravnpad-mcp.exe` sit beside `ravnpad.exe`. m
 
 Paste-ready agent rules: [ravnpad.com](https://ravnpad.com/#agents).
 
-A patch must include `operation_id`, `document_id`, `base_revision`, `base_hash`, and `edits[]` with `start_byte`, `end_byte`, `expected_text`, and `replacement` (half-open UTF-8 byte ranges). Overlaps, invalid UTF-8 boundaries, mixed line endings, NUL, more than 128 edits, or more than 256 KiB of changed text are rejected. Closing RavnPad, opening another document, or restarting drops the handle.
+A patch must include `operation_id`, `document_id`, `base_revision`, `base_hash`, and `edits[]` with `start_byte`, `end_byte`, `expected_text`, and `replacement` (half-open UTF-8 byte ranges). Overlaps, invalid UTF-8 boundaries, mixed line endings, NUL, or more than 128 edits are rejected. Closing RavnPad, opening another document, or restarting drops the handle.
 
 ## Get it
 

@@ -73,7 +73,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "ravnpad_document_propose",
-            "description": "Submit a revision-bound UTF-8 byte patch for human approval. It does not change the active buffer or target file until approved in RavnPad.",
+            "description": "Submit a revision-bound UTF-8 byte patch for direct application to the active buffer. Validation rejects stale or ambiguous edits, and the target file is not saved.",
             "inputSchema": object_schema(json!({
                 "instance_id":{"type":"string"}, "document_id":{"type":"string"},
                 "operation_id":{"type":"string"}, "base_revision":{"type":"integer","minimum":0},
@@ -83,7 +83,7 @@ fn tools() -> Vec<Value> {
                     "expected_text":{"type":"string"}, "replacement":{"type":"string"}
                 },"required":["start_byte","end_byte","expected_text","replacement"]}}
             }), &["instance_id","document_id","operation_id","base_revision","base_hash","edits"]),
-            "annotations": {"readOnlyHint": false, "destructiveHint": false}
+            "annotations": {"readOnlyHint": false, "destructiveHint": true}
         }),
     ]
 }

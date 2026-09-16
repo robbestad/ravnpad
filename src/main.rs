@@ -723,7 +723,8 @@ impl RavnPad {
         self.document.replace_document(&self.text);
     }
 
-    fn poll_agent(&mut self) {
+    fn poll_agent(&mut self, edits_allowed: bool) -> Option<document::Proposal> {
+        let mut applied_proposal = None;
         loop {
             let request = match self.agent.as_ref().map(agent::Server::try_recv) {
                 Some(Ok(request)) => request,
@@ -817,6 +818,21 @@ impl RavnPad {
                     request.respond(agent::bounded_snapshot_response(snapshot));
                 }
                 agent::Request::DocumentPropose { patch, .. } => {
+                    if !edits_allowed
+                        || self.file_busy
+                        || matches!(self.update, UpdateUi::Downloading)
+                        || self.restarting
+                        || self.close_requested
+                        || self.confirm.is_some()
+                    {
+                        request.respond(agent::Response::Error {
+                            error: agent::ApiError::new(
+                                "busy",
+                                "a file operation is in progress; reread and retry when it finishes",
+                            ),
+                        });
+                        continue;
+                    }
                     if self.large.is_some() || self.text.contains('\0') {
                         request.respond(agent::Response::Error {
                             error: agent::ApiError::new(
@@ -839,12 +855,21 @@ impl RavnPad {
                             let proposal = proposal.clone();
                             match self.document.proposal_status(&proposal.operation_id) {
                                 Some(document::ProposalStatus::Pending) => {
-                                    if !self.pending_agent.contains(&proposal.operation_id) {
-                                        self.pending_agent.push_back(proposal.operation_id.clone());
+                                    match self.approve_agent_proposal(&proposal.operation_id) {
+                                        Ok(_) => {
+                                            self.refresh_document();
+                                            request.respond(agent::Response::Applied {
+                                                proposal: (&proposal).into(),
+                                            });
+                                            applied_proposal = Some(proposal);
+                                        }
+                                        Err(error) => {
+                                            self.reject_agent_proposal(&proposal.operation_id);
+                                            request.respond(agent::Response::Error {
+                                                error: agent::ApiError::document(error),
+                                            });
+                                        }
                                     }
-                                    request.respond(agent::Response::PendingApproval {
-                                        proposal: (&proposal).into(),
-                                    });
                                 }
                                 Some(document::ProposalStatus::Applied) => {
                                     request.respond(agent::Response::Applied {
@@ -865,7 +890,11 @@ impl RavnPad {
                     }
                 }
             }
+            if applied_proposal.is_some() {
+                break;
+            }
         }
+        applied_proposal
     }
 
     fn approve_agent_proposal(&mut self, operation_id: &str) -> Result<String, document::Error> {
@@ -1527,6 +1556,42 @@ impl RavnPad {
         state.store(ctx, editor);
     }
 
+    fn remap_editor_selection(ctx: &egui::Context, proposal: &document::Proposal) {
+        fn char_position(text: &str, byte: usize) -> usize {
+            text[..byte].chars().count()
+        }
+        fn map_position(position: usize, proposal: &document::Proposal) -> usize {
+            let mut delta = 0isize;
+            for hunk in &proposal.hunks {
+                let start = char_position(&proposal.before, hunk.before_start);
+                let end = char_position(&proposal.before, hunk.before_end);
+                let after_start = char_position(&proposal.after, hunk.after_start);
+                let after_end = char_position(&proposal.after, hunk.after_end);
+                if position < start {
+                    break;
+                }
+                if start < end && position < end {
+                    return after_start + (position - start).min(after_end - after_start);
+                }
+                delta += (after_end - after_start) as isize - (end - start) as isize;
+            }
+            position.saturating_add_signed(delta)
+        }
+
+        let editor = egui::Id::new("editor");
+        let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor) else {
+            return;
+        };
+        let Some(mut range) = state.cursor.char_range() else {
+            return;
+        };
+        range.primary.index = map_position(range.primary.index, proposal);
+        range.secondary.index = map_position(range.secondary.index, proposal);
+        range.h_pos = None;
+        state.cursor.set_char_range(Some(range));
+        state.store(ctx, editor);
+    }
+
     // Files macOS asks us to open (double-click, "Open With"). One per
     // frame so the save-confirmation can gate each open like drops do.
     fn take_macos_opens(&mut self) -> Option<Action> {
@@ -1580,7 +1645,9 @@ impl eframe::App for RavnPad {
         self.poll_recovery();
         self.poll_files();
         self.refresh_document();
-        self.poll_agent();
+        if let Some(proposal) = self.poll_agent(true) {
+            Self::remap_editor_selection(ctx, &proposal);
+        }
         if self.file_busy {
             if ctx.input(|i| i.viewport().close_requested()) {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);

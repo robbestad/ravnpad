@@ -11,7 +11,7 @@ unsafe extern "C" {
     fn rp_run();
     fn rp_smoke_test() -> i32;
     fn rp_document(text: *const c_char, length: usize, readonly: i32);
-    fn rp_replace_text(text: *const c_char, length: usize);
+    fn rp_replace_text(text: *const c_char, length: usize, hunks: *const NativeHunk, count: usize);
     fn rp_copy_text(length: *mut usize) -> *mut c_char;
     fn rp_free_text(text: *mut c_char);
     fn rp_state(
@@ -41,6 +41,41 @@ unsafe extern "C" {
         discard: *const c_char,
         cancel: *const c_char,
     ) -> i32;
+}
+
+#[repr(C)]
+struct NativeHunk {
+    before_start: usize,
+    before_end: usize,
+    after_start: usize,
+    after_end: usize,
+}
+
+fn native_hunks(proposal: &document::Proposal) -> Vec<NativeHunk> {
+    fn position(text: &str, byte: usize) -> usize {
+        let value = &text[..byte];
+        let utf16 = value.encode_utf16().count();
+        #[cfg(windows)]
+        return utf16
+            - value
+                .as_bytes()
+                .windows(2)
+                .filter(|pair| *pair == b"\r\n")
+                .count();
+        #[cfg(not(windows))]
+        return utf16;
+    }
+
+    proposal
+        .hunks
+        .iter()
+        .map(|hunk| NativeHunk {
+            before_start: position(&proposal.before, hunk.before_start),
+            before_end: position(&proposal.before, hunk.before_end),
+            after_start: position(&proposal.after, hunk.after_start),
+            after_end: position(&proposal.after, hunk.after_end),
+        })
+        .collect()
 }
 
 enum Event {
@@ -548,47 +583,6 @@ impl Native {
             }
         }
         self.sync_text();
-        self.app.poll_agent();
-        if let Some(operation_id) = self.app.pending_agent.pop_front() {
-            if let Some(proposal) = self.app.document.proposal(&operation_id).cloned() {
-                let preview = proposal_preview(&proposal.before, &proposal.after, &proposal.hunks);
-                unsafe {
-                    rp_lock();
-                }
-                match confirm(
-                    "Agent suggestion",
-                    &preview,
-                    "Apply",
-                    "Reject",
-                    self.app.t().cancel,
-                ) {
-                    native_dialog::Confirm::Save => {
-                        match self.app.approve_agent_proposal(&operation_id) {
-                            Ok(text) => unsafe {
-                                rp_replace_text(text.as_ptr().cast(), text.len());
-                            },
-                            Err(error) => {
-                                self.app.reject_agent_proposal(&operation_id);
-                                self.app.error = Some(AppError::Agent(error));
-                            }
-                        }
-                    }
-                    native_dialog::Confirm::Discard => {
-                        self.app.reject_agent_proposal(&operation_id)
-                    }
-                    native_dialog::Confirm::Cancel => {}
-                }
-            }
-        }
-        if !self.app.file_busy
-            && !self.viewer_busy
-            && let Some(path) = self.pending_opens.pop_front()
-        {
-            self.request(Action::OpenPath(path));
-        }
-        self.app.poll_recovery();
-        self.app.poll_files();
-        self.app.refresh_document();
         if self.presented != self.app.document_generation && !self.app.file_busy {
             self.presented = self.app.document_generation;
             self.changed = false;
@@ -613,6 +607,65 @@ impl Native {
                 }
             }
         }
+        if let Some(proposal) = self
+            .app
+            .poll_agent(!self.viewer_busy && !self.large_document)
+        {
+            let hunks = native_hunks(&proposal);
+            unsafe {
+                rp_replace_text(
+                    self.app.text.as_ptr().cast(),
+                    self.app.text.len(),
+                    hunks.as_ptr(),
+                    hunks.len(),
+                );
+            }
+        }
+        if let Some(operation_id) = self.app.pending_agent.pop_front() {
+            if let Some(proposal) = self.app.document.proposal(&operation_id).cloned() {
+                let preview = proposal_preview(&proposal.before, &proposal.after, &proposal.hunks);
+                unsafe {
+                    rp_lock();
+                }
+                match confirm(
+                    "Agent suggestion",
+                    &preview,
+                    "Apply",
+                    "Reject",
+                    self.app.t().cancel,
+                ) {
+                    native_dialog::Confirm::Save => {
+                        match self.app.approve_agent_proposal(&operation_id) {
+                            Ok(text) => unsafe {
+                                rp_replace_text(
+                                    text.as_ptr().cast(),
+                                    text.len(),
+                                    std::ptr::null(),
+                                    0,
+                                );
+                            },
+                            Err(error) => {
+                                self.app.reject_agent_proposal(&operation_id);
+                                self.app.error = Some(AppError::Agent(error));
+                            }
+                        }
+                    }
+                    native_dialog::Confirm::Discard => {
+                        self.app.reject_agent_proposal(&operation_id)
+                    }
+                    native_dialog::Confirm::Cancel => {}
+                }
+            }
+        }
+        if !self.app.file_busy
+            && !self.viewer_busy
+            && let Some(path) = self.pending_opens.pop_front()
+        {
+            self.request(Action::OpenPath(path));
+        }
+        self.app.poll_recovery();
+        self.app.poll_files();
+        self.app.refresh_document();
         if let Ok((view, result)) = self.viewer_rx.try_recv() {
             self.viewer_busy = false;
             self.app.large = Some(view);

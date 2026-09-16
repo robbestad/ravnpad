@@ -17,8 +17,8 @@ const DEMO_TEXT = `Open a file. Write. Save.
 That is still the whole product.
 
 Need an agent? Start with --enable-agent.
-It reads the live buffer and proposes an edit.
-You approve. It does not save.`;
+It reads the live buffer and applies a validated edit.
+It does not save.`;
 
 const START_CMD = `ravnpad --enable-agent notes.txt`;
 
@@ -60,14 +60,14 @@ Rules:
 - Use ravnpad-cli or ravnpad-mcp. Do not write the open file on disk to "help".
 - The live buffer is not the file. Unsaved edits exist only in the editor.
 - Workflow: document status → document read → document propose.
-- Propose a UTF-8 byte patch. RavnPad shows a side-by-side preview. Nothing changes until the human approves.
-- Approval applies one undoable edit to the buffer and does not save the file. Rejection changes nothing.
+- Propose a UTF-8 byte patch. RavnPad applies it directly when its document ID, revision, buffer hash, ranges, and expected text still match.
+- A valid patch is one undoable edit to the buffer and does not save the file. If validation fails, reread the live buffer and merge against the current text.
 - Direct file access is separate and read-only: ravnpad-cli file read PATH --json.
 
 Patch contract:
 - Required: operation_id, document_id, base_revision, base_hash, edits[].
 - Each edit: start_byte, end_byte, expected_text, replacement (half-open UTF-8 byte range).
-- Reject yourself before sending: overlapping edits, invalid UTF-8 boundaries, mixed line endings, NUL, more than 128 edits, or more than 256 KiB of changed text.
+- Reject yourself before sending: overlapping edits, invalid UTF-8 boundaries, mixed line endings, NUL, or more than 128 edits.
 - Bind the patch to the current base_revision and base_hash from document status/read. Stale revisions are rejected.
 
 Windows release zip: ravnpad-cli.exe and ravnpad-mcp.exe sit beside ravnpad.exe.
@@ -146,8 +146,8 @@ const AGENT_POINTS = [
     body: "Agents read what you are looking at, including unsaved edits. They never fall back to the file on disk. Closing the window, opening another document, or restarting drops the handle.",
   },
   {
-    title: "Propose. You approve.",
-    body: "A patch is revision- and hash-bound. RavnPad validates it, then shows a side-by-side preview. Rejection changes nothing. Approval is one undoable edit and still does not save.",
+    title: "Validated direct edits.",
+    body: "A patch is bound to the document revision, buffer hash, ranges, and expected text. RavnPad applies a valid patch as one undoable edit without saving; stale or ambiguous patches are rejected for the agent to reread and merge.",
   },
   {
     title: "Local, owner-only",
@@ -350,7 +350,8 @@ export const App = create<Record<string, never>, AppState>({
             <p className="lede">
               Open a file, write, save. That is still the whole product. When
               you want an agent in the room, it reads the live buffer and
-              proposes a patch. Nothing changes until you approve it.
+              proposes a patch. RavnPad applies it directly when it still matches
+              the live buffer.
             </p>
             <div className="hero-actions">
               <a className="btn primary" href={primary.href}>
