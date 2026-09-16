@@ -1569,7 +1569,7 @@ impl RavnPad {
                 if position < start {
                     break;
                 }
-                if start < end && position <= end {
+                if start < end && position < end {
                     return after_start + (position - start).min(after_end - after_start);
                 }
                 delta += (after_end - after_start) as isize - (end - start) as isize;

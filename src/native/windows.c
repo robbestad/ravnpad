@@ -477,7 +477,7 @@ static LONG map_position(LONG position,const RpHunk *hunks,size_t count) {
         LONG start=(LONG)hunks[i].before_start, end=(LONG)hunks[i].before_end;
         LONG afterStart=(LONG)hunks[i].after_start, afterEnd=(LONG)hunks[i].after_end;
         if(position<start) break;
-        if(start<end && position<=end) {
+        if(start<end && position<end) {
             LONG relative=position-start, replacement=afterEnd-afterStart;
             return afterStart+(relative<replacement?relative:replacement);
         }

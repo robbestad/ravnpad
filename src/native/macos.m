@@ -245,7 +245,7 @@ static NSUInteger mapPosition(NSUInteger position,const RpHunk *hunks,size_t cou
         NSUInteger start=hunks[i].before_start, end=hunks[i].before_end;
         NSUInteger afterStart=hunks[i].after_start, afterEnd=hunks[i].after_end;
         if(position<start) break;
-        if(start<end && position<=end) {
+        if(start<end && position<end) {
             NSUInteger relative=position-start, replacement=afterEnd-afterStart;
             return afterStart+MIN(relative,replacement);
         }
