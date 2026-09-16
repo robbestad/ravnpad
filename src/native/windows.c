@@ -450,7 +450,9 @@ void rp_run(void) {
         smokeResult=valid?0:1; fprintf(stderr,"Native Win32 smoke test: %s\n",valid?"PASS":"FAIL");
         DestroyWindow(window); if(font)DeleteObject(font); FreeLibrary(rich); OleUninitialize(); return;
     }
-    ShowWindow(window,SW_SHOW); UpdateWindow(window); rp_tick();
+    // Apply the saved theme before the first paint, but defer full state
+    // synchronization until the window is visible: it can show modal dialogs.
+    rp_startup_theme(); ShowWindow(window,SW_SHOW); UpdateWindow(window); rp_tick();
     MSG msg;
     while(GetMessageW(&msg,NULL,0,0)>0) {
         if(findDialog&&IsDialogMessageW(findDialog,&msg))continue;

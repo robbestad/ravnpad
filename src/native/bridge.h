@@ -12,6 +12,9 @@ enum { RP_NEW=1, RP_OPEN, RP_SAVE, RP_SAVE_AS, RP_QUIT, RP_UPDATE, RP_SPELL,
        RP_AGENT=52, RP_ENABLE_AGENT=53, RP_AGENT_ENABLED=54,
        RP_DISABLE_AGENT=55, RP_AGENT_HELP=56 };
 void rp_tick(void);
+// Apply only the persisted appearance before making the main window visible.
+// Full state synchronization can show dialogs, so it runs after activation.
+void rp_startup_theme(void);
 void rp_action(int command);
 void rp_changed(void);
 void rp_open(const char *path);
