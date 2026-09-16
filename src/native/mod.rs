@@ -310,6 +310,30 @@ pub extern "C" fn rp_tick() {
         }
     });
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rp_startup_theme() {
+    APP.with(|slot| {
+        let Ok(guard) = slot.try_borrow() else {
+            return;
+        };
+        let Some(native) = guard.as_ref() else {
+            return;
+        };
+        unsafe {
+            rp_theme(theme_preference(native.app.prefs.theme));
+        }
+    });
+}
+
+fn theme_preference(theme: prefs::ThemePref) -> i32 {
+    match theme {
+        prefs::ThemePref::System => 0,
+        prefs::ThemePref::Light => 1,
+        prefs::ThemePref::Dark => 2,
+    }
+}
+
 impl Native {
     fn sync_text(&mut self) {
         if !self.changed || self.binary_readonly || self.app.large.is_some() || self.viewer_busy {
@@ -729,11 +753,7 @@ impl Native {
                     .unwrap_or(0) as i32,
             );
             rp_wrap(self.app.prefs.line_wrap as i32);
-            rp_theme(match self.app.prefs.theme {
-                prefs::ThemePref::System => 0,
-                prefs::ThemePref::Light => 1,
-                prefs::ThemePref::Dark => 2,
-            });
+            rp_theme(theme_preference(self.app.prefs.theme));
             rp_agent(self.app.agent.is_some() as i32);
             if self.app.close_requested {
                 self.app.recovery.finish();

@@ -450,10 +450,9 @@ void rp_run(void) {
         smokeResult=valid?0:1; fprintf(stderr,"Native Win32 smoke test: %s\n",valid?"PASS":"FAIL");
         DestroyWindow(window); if(font)DeleteObject(font); FreeLibrary(rich); OleUninitialize(); return;
     }
-    // Initialize the saved theme and document state before the first paint.
-    // Showing first lets USER32 paint the class's default white background,
-    // which produces a visible flash when the saved theme is dark.
-    rp_tick(); ShowWindow(window,SW_SHOW); UpdateWindow(window);
+    // Apply the saved theme before the first paint, but defer full state
+    // synchronization until the window is visible: it can show modal dialogs.
+    rp_startup_theme(); ShowWindow(window,SW_SHOW); UpdateWindow(window); rp_tick();
     MSG msg;
     while(GetMessageW(&msg,NULL,0,0)>0) {
         if(findDialog&&IsDialogMessageW(findDialog,&msg))continue;

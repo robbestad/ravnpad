@@ -157,15 +157,16 @@ void rp_rebuild_menus(void) {
     filePosition.continuous=NO; filePosition.autoresizingMask=NSViewMinXMargin; filePosition.hidden=YES;
     filePosition.accessibilityLabel=@"File position"; [content addSubview:filePosition];
     rp_rebuild_menus(); if(smokeTest) return;
-    // Apply the document state, preferences, and appearance while the window
-    // is still hidden. Otherwise AppKit briefly presents its default light
-    // background before a saved dark theme reaches rp_theme().
-    rp_tick();
+    // Apply only the saved appearance while hidden. Full synchronization can
+    // present recovery, error, or update dialogs, so it waits until after the
+    // document window has been shown and activated.
+    rp_startup_theme();
     [window.contentView layoutSubtreeIfNeeded];
     [window displayIfNeeded];
     [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:editor];
     [NSApp activateIgnoringOtherApps:YES];
     [NSTimer scheduledTimerWithTimeInterval:0.15 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+    rp_tick();
 }
 - (void)tick:(NSTimer *)timer { (void)timer; rp_tick(); }
 - (void)textDidChange:(NSNotification *)notification { (void)notification; if (!updating) { window.documentEdited=YES; rp_changed(); } }
