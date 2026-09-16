@@ -26,7 +26,8 @@ void rp_run(void);
 int rp_smoke_test(void);
 void rp_document(const char *text, size_t length, int readonly);
 // Replace the editable buffer as one undoable action without clearing history.
-void rp_replace_text(const char *text, size_t length);
+typedef struct { size_t before_start, before_end, after_start, after_end; } RpHunk;
+void rp_replace_text(const char *text, size_t length, const RpHunk *hunks, size_t count);
 // Returned buffer is malloc-owned by the native side; release with rp_free_text.
 char *rp_copy_text(size_t *length);
 void rp_free_text(char *text);

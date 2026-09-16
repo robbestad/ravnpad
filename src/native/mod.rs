@@ -11,7 +11,7 @@ unsafe extern "C" {
     fn rp_run();
     fn rp_smoke_test() -> i32;
     fn rp_document(text: *const c_char, length: usize, readonly: i32);
-    fn rp_replace_text(text: *const c_char, length: usize);
+    fn rp_replace_text(text: *const c_char, length: usize, hunks: *const NativeHunk, count: usize);
     fn rp_copy_text(length: *mut usize) -> *mut c_char;
     fn rp_free_text(text: *mut c_char);
     fn rp_state(
@@ -41,6 +41,27 @@ unsafe extern "C" {
         discard: *const c_char,
         cancel: *const c_char,
     ) -> i32;
+}
+
+#[repr(C)]
+struct NativeHunk {
+    before_start: usize,
+    before_end: usize,
+    after_start: usize,
+    after_end: usize,
+}
+
+fn native_hunks(proposal: &document::Proposal) -> Vec<NativeHunk> {
+    proposal
+        .hunks
+        .iter()
+        .map(|hunk| NativeHunk {
+            before_start: proposal.before[..hunk.before_start].encode_utf16().count(),
+            before_end: proposal.before[..hunk.before_end].encode_utf16().count(),
+            after_start: proposal.after[..hunk.after_start].encode_utf16().count(),
+            after_end: proposal.after[..hunk.after_end].encode_utf16().count(),
+        })
+        .collect()
 }
 
 enum Event {
@@ -548,9 +569,15 @@ impl Native {
             }
         }
         self.sync_text();
-        if self.app.poll_agent() {
+        if let Some(proposal) = self.app.poll_agent() {
+            let hunks = native_hunks(&proposal);
             unsafe {
-                rp_replace_text(self.app.text.as_ptr().cast(), self.app.text.len());
+                rp_replace_text(
+                    self.app.text.as_ptr().cast(),
+                    self.app.text.len(),
+                    hunks.as_ptr(),
+                    hunks.len(),
+                );
             }
         }
         if let Some(operation_id) = self.app.pending_agent.pop_front() {
@@ -569,7 +596,12 @@ impl Native {
                     native_dialog::Confirm::Save => {
                         match self.app.approve_agent_proposal(&operation_id) {
                             Ok(text) => unsafe {
-                                rp_replace_text(text.as_ptr().cast(), text.len());
+                                rp_replace_text(
+                                    text.as_ptr().cast(),
+                                    text.len(),
+                                    std::ptr::null(),
+                                    0,
+                                );
                             },
                             Err(error) => {
                                 self.app.reject_agent_proposal(&operation_id);

@@ -723,8 +723,8 @@ impl RavnPad {
         self.document.replace_document(&self.text);
     }
 
-    fn poll_agent(&mut self) -> bool {
-        let mut text_changed = false;
+    fn poll_agent(&mut self) -> Option<document::Proposal> {
+        let mut applied_proposal = None;
         loop {
             let request = match self.agent.as_ref().map(agent::Server::try_recv) {
                 Some(Ok(request)) => request,
@@ -821,6 +821,7 @@ impl RavnPad {
                     if self.file_busy
                         || matches!(self.update, UpdateUi::Downloading)
                         || self.restarting
+                        || self.confirm.is_some()
                     {
                         request.respond(agent::Response::Error {
                             error: agent::ApiError::new(
@@ -854,11 +855,11 @@ impl RavnPad {
                                 Some(document::ProposalStatus::Pending) => {
                                     match self.approve_agent_proposal(&proposal.operation_id) {
                                         Ok(_) => {
-                                            text_changed = true;
                                             self.refresh_document();
                                             request.respond(agent::Response::Applied {
                                                 proposal: (&proposal).into(),
                                             });
+                                            applied_proposal = Some(proposal);
                                         }
                                         Err(error) => {
                                             self.reject_agent_proposal(&proposal.operation_id);
@@ -887,8 +888,11 @@ impl RavnPad {
                     }
                 }
             }
+            if applied_proposal.is_some() {
+                break;
+            }
         }
-        text_changed
+        applied_proposal
     }
 
     fn approve_agent_proposal(&mut self, operation_id: &str) -> Result<String, document::Error> {
