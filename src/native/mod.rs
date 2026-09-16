@@ -52,14 +52,28 @@ struct NativeHunk {
 }
 
 fn native_hunks(proposal: &document::Proposal) -> Vec<NativeHunk> {
+    fn position(text: &str, byte: usize) -> usize {
+        let value = &text[..byte];
+        let utf16 = value.encode_utf16().count();
+        #[cfg(windows)]
+        return utf16
+            - value
+                .as_bytes()
+                .windows(2)
+                .filter(|pair| *pair == b"\r\n")
+                .count();
+        #[cfg(not(windows))]
+        return utf16;
+    }
+
     proposal
         .hunks
         .iter()
         .map(|hunk| NativeHunk {
-            before_start: proposal.before[..hunk.before_start].encode_utf16().count(),
-            before_end: proposal.before[..hunk.before_end].encode_utf16().count(),
-            after_start: proposal.after[..hunk.after_start].encode_utf16().count(),
-            after_end: proposal.after[..hunk.after_end].encode_utf16().count(),
+            before_start: position(&proposal.before, hunk.before_start),
+            before_end: position(&proposal.before, hunk.before_end),
+            after_start: position(&proposal.after, hunk.after_start),
+            after_end: position(&proposal.after, hunk.after_end),
         })
         .collect()
 }
