@@ -723,7 +723,7 @@ impl RavnPad {
         self.document.replace_document(&self.text);
     }
 
-    fn poll_agent(&mut self) -> Option<document::Proposal> {
+    fn poll_agent(&mut self, edits_allowed: bool) -> Option<document::Proposal> {
         let mut applied_proposal = None;
         loop {
             let request = match self.agent.as_ref().map(agent::Server::try_recv) {
@@ -818,7 +818,8 @@ impl RavnPad {
                     request.respond(agent::bounded_snapshot_response(snapshot));
                 }
                 agent::Request::DocumentPropose { patch, .. } => {
-                    if self.file_busy
+                    if !edits_allowed
+                        || self.file_busy
                         || matches!(self.update, UpdateUi::Downloading)
                         || self.restarting
                         || self.close_requested
@@ -1644,7 +1645,7 @@ impl eframe::App for RavnPad {
         self.poll_recovery();
         self.poll_files();
         self.refresh_document();
-        if let Some(proposal) = self.poll_agent() {
+        if let Some(proposal) = self.poll_agent(true) {
             Self::remap_editor_selection(ctx, &proposal);
         }
         if self.file_busy {

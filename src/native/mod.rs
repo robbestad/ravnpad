@@ -607,7 +607,10 @@ impl Native {
                 }
             }
         }
-        if let Some(proposal) = self.app.poll_agent() {
+        if let Some(proposal) = self
+            .app
+            .poll_agent(!self.viewer_busy && !self.large_document)
+        {
             let hunks = native_hunks(&proposal);
             unsafe {
                 rp_replace_text(
