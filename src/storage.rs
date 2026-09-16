@@ -225,6 +225,17 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn smb_metadata_fallback_rejects_non_provenance_xattrs() {
+        assert!(!has_non_provenance_extended_attribute_names(
+            b"com.apple.provenance\0"
+        ));
+        assert!(has_non_provenance_extended_attribute_names(
+            b"com.apple.provenance\0user.note\0"
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     #[ignore = "requires RAVNPAD_MACOS_SMB_TEST_DIR pointing to a mounted SMB share"]
     fn saves_repeatedly_on_macos_smb_share() {
         let root = std::env::var_os("RAVNPAD_MACOS_SMB_TEST_DIR")
@@ -413,21 +424,44 @@ mod conflict_tests {
 #[cfg(target_os = "macos")]
 fn preserve_metadata(source: &Path, tmp: &tempfile::NamedTempFile) -> io::Result<()> {
     use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+    const COPYFILE_SECURITY: u32 = 3;
+    const COPYFILE_METADATA: u32 = 7;
     unsafe extern "C" {
         fn fcopyfile(from: i32, to: i32, state: *mut std::ffi::c_void, flags: u32) -> i32;
     }
     let original = fs::File::open(source)?;
     // copyfile.h: COPYFILE_METADATA = STAT | ACL | XATTR. No file data copied.
-    let result = unsafe {
+    let mut result = unsafe {
         fcopyfile(
             original.as_raw_fd(),
             tmp.as_file().as_raw_fd(),
             std::ptr::null_mut(),
-            7,
+            COPYFILE_METADATA,
         )
     };
     if result != 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        // Some SMB providers reject COPYFILE_XATTR when the source has no user
+        // xattrs and only macOS's non-copyable provenance marker. In that exact
+        // case, retain stat data and ACLs using the supported subset. Never use
+        // the fallback when other xattrs exist or their absence is uncertain.
+        if error.kind() != io::ErrorKind::PermissionDenied
+            || !is_macos_smb(&original)
+            || source_has_non_provenance_extended_attributes(&original)?
+        {
+            return Err(error);
+        }
+        result = unsafe {
+            fcopyfile(
+                original.as_raw_fd(),
+                tmp.as_file().as_raw_fd(),
+                std::ptr::null_mut(),
+                COPYFILE_SECURITY,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     let before = original.metadata()?;
     let after = tmp.as_file().metadata()?;
@@ -439,6 +473,41 @@ fn preserve_metadata(source: &Path, tmp: &tempfile::NamedTempFile) -> io::Result
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn source_has_non_provenance_extended_attributes(source: &fs::File) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+
+    let size = unsafe { libc::flistxattr(source.as_raw_fd(), std::ptr::null_mut(), 0, 0) };
+    if size < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if size == 0 {
+        return Ok(false);
+    }
+    let mut names = vec![0_u8; size as usize];
+    let read = unsafe {
+        libc::flistxattr(
+            source.as_raw_fd(),
+            names.as_mut_ptr().cast(),
+            names.len(),
+            0,
+        )
+    };
+    if read < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let names = &names[..read as usize];
+    Ok(has_non_provenance_extended_attribute_names(names))
+}
+
+#[cfg(target_os = "macos")]
+fn has_non_provenance_extended_attribute_names(names: &[u8]) -> bool {
+    names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .any(|name| name != b"com.apple.provenance")
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
