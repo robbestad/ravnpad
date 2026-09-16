@@ -583,6 +583,30 @@ impl Native {
             }
         }
         self.sync_text();
+        if self.presented != self.app.document_generation && !self.app.file_busy {
+            self.presented = self.app.document_generation;
+            self.changed = false;
+            labels(self.app.prefs.lang);
+            unsafe {
+                rp_rebuild_menus();
+            }
+            self.binary_readonly = self.app.text.contains('\0');
+            self.last_find = None;
+            self.large_document = self.app.large.is_some();
+            if self.app.large.is_some() {
+                self.view(None);
+            } else {
+                let text = self.app.text.replace('\0', "␀");
+                unsafe {
+                    rp_document(
+                        text.as_ptr().cast(),
+                        text.len(),
+                        self.binary_readonly as i32,
+                    );
+                    rp_restore_position(self.app.editor_scroll_y as f64);
+                }
+            }
+        }
         if let Some(proposal) = self.app.poll_agent() {
             let hunks = native_hunks(&proposal);
             unsafe {
@@ -639,30 +663,6 @@ impl Native {
         self.app.poll_recovery();
         self.app.poll_files();
         self.app.refresh_document();
-        if self.presented != self.app.document_generation && !self.app.file_busy {
-            self.presented = self.app.document_generation;
-            self.changed = false;
-            labels(self.app.prefs.lang);
-            unsafe {
-                rp_rebuild_menus();
-            }
-            self.binary_readonly = self.app.text.contains('\0');
-            self.last_find = None;
-            self.large_document = self.app.large.is_some();
-            if self.app.large.is_some() {
-                self.view(None);
-            } else {
-                let text = self.app.text.replace('\0', "␀");
-                unsafe {
-                    rp_document(
-                        text.as_ptr().cast(),
-                        text.len(),
-                        self.binary_readonly as i32,
-                    );
-                    rp_restore_position(self.app.editor_scroll_y as f64);
-                }
-            }
-        }
         if let Ok((view, result)) = self.viewer_rx.try_recv() {
             self.viewer_busy = false;
             self.app.large = Some(view);
