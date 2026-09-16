@@ -843,6 +843,7 @@ impl RavnPad {
                                     match self.approve_agent_proposal(&proposal.operation_id) {
                                         Ok(_) => {
                                             text_changed = true;
+                                            self.refresh_document();
                                             request.respond(agent::Response::Applied {
                                                 proposal: (&proposal).into(),
                                             });

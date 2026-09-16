@@ -72,7 +72,7 @@ Windows zip: `ravnpad-cli.exe` and `ravnpad-mcp.exe` sit beside `ravnpad.exe`. m
 
 Paste-ready agent rules: [ravnpad.com](https://ravnpad.com/#agents).
 
-A patch must include `operation_id`, `document_id`, `base_revision`, `base_hash`, and `edits[]` with `start_byte`, `end_byte`, `expected_text`, and `replacement` (half-open UTF-8 byte ranges). Overlaps, invalid UTF-8 boundaries, mixed line endings, NUL, more than 128 edits, or more than 256 KiB of changed text are rejected. Closing RavnPad, opening another document, or restarting drops the handle.
+A patch must include `operation_id`, `document_id`, `base_revision`, `base_hash`, and `edits[]` with `start_byte`, `end_byte`, `expected_text`, and `replacement` (half-open UTF-8 byte ranges). Overlaps, invalid UTF-8 boundaries, mixed line endings, NUL, or more than 128 edits are rejected. Closing RavnPad, opening another document, or restarting drops the handle.
 
 ## Get it
 

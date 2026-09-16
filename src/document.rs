@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const RANGE_UNIT: &str = "utf8-byte";
 const MAX_PROPOSAL_HISTORY: usize = 1024;
 const MAX_PATCH_EDITS: usize = 128;
