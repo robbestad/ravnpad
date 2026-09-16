@@ -818,6 +818,15 @@ impl RavnPad {
                     request.respond(agent::bounded_snapshot_response(snapshot));
                 }
                 agent::Request::DocumentPropose { patch, .. } => {
+                    if self.file_busy {
+                        request.respond(agent::Response::Error {
+                            error: agent::ApiError::new(
+                                "busy",
+                                "a file operation is in progress; reread and retry when it finishes",
+                            ),
+                        });
+                        continue;
+                    }
                     if self.large.is_some() || self.text.contains('\0') {
                         request.respond(agent::Response::Error {
                             error: agent::ApiError::new(

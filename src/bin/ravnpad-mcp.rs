@@ -83,7 +83,7 @@ fn tools() -> Vec<Value> {
                     "expected_text":{"type":"string"}, "replacement":{"type":"string"}
                 },"required":["start_byte","end_byte","expected_text","replacement"]}}
             }), &["instance_id","document_id","operation_id","base_revision","base_hash","edits"]),
-            "annotations": {"readOnlyHint": false, "destructiveHint": false}
+            "annotations": {"readOnlyHint": false, "destructiveHint": true}
         }),
     ]
 }
