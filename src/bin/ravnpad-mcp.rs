@@ -58,7 +58,7 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "ravnpad_document_status",
-            "description": "Return the current document identity for an explicitly agent-enabled RavnPad instance.",
+            "description": "Return the current document identity for a RavnPad instance whose agent access is set to Explore or Edit.",
             "inputSchema": object_schema(json!({"instance_id":{"type":"string"}}), &["instance_id"]),
             "annotations": {"readOnlyHint": true}
         }),
@@ -73,7 +73,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "ravnpad_document_propose",
-            "description": "Submit a revision-bound UTF-8 byte patch for direct application to the active buffer. Validation rejects stale or ambiguous edits, and the target file is not saved.",
+            "description": "Submit a revision-bound UTF-8 byte patch for direct application to the active buffer. This requires Agent > Edit in the target RavnPad app. Validation rejects stale or ambiguous edits, and the target file is not saved.",
             "inputSchema": object_schema(json!({
                 "instance_id":{"type":"string"}, "document_id":{"type":"string"},
                 "operation_id":{"type":"string"}, "base_revision":{"type":"integer","minimum":0},

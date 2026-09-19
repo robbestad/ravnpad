@@ -313,9 +313,9 @@ fn labels(lang: i18n::Lang) {
         (50, t.no_matches),
         (51, t.whole_word),
         (52, t.agent_menu),
-        (53, t.enable_agent),
-        (54, t.agent_enabled),
-        (55, lang.disable_agent()),
+        (53, lang.agent_off()),
+        (54, t.enable_agent),
+        (55, t.agent_enabled),
         (56, lang.agent_help()),
     ] {
         labels[id] = c(value);
@@ -533,8 +533,9 @@ impl Native {
                     4 => self.request(Action::SaveAs),
                     5 => self.request(Action::Quit),
                     6 => self.request(Action::CheckUpdate),
-                    53 => self.app.start_agent(),
-                    55 => self.app.stop_agent(),
+                    53 => self.app.set_agent_mode(AgentMode::Off),
+                    54 => self.app.set_agent_mode(AgentMode::Explore),
+                    55 => self.app.set_agent_mode(AgentMode::Edit),
                     56 => {
                         let message = self.app.agent_help_text();
                         info(self.app.prefs.lang.agent_help(), &message, self.app.t().ok);
@@ -807,7 +808,11 @@ impl Native {
             );
             rp_wrap(self.app.prefs.line_wrap as i32);
             rp_theme(theme_preference(self.app.prefs.theme));
-            rp_agent(self.app.agent.is_some() as i32);
+            rp_agent(match self.app.agent_mode {
+                AgentMode::Off => 0,
+                AgentMode::Explore => 1,
+                AgentMode::Edit => 2,
+            });
             if self.app.close_requested {
                 self.app.recovery.finish();
                 rp_close();

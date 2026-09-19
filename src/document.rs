@@ -476,6 +476,7 @@ pub enum ProposalStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum Error {
+    ReadOnlyAccess,
     WrongDocument,
     StaleRevision { expected: u64, actual: u64 },
     HashMismatch,

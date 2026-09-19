@@ -16,11 +16,11 @@ const DEMO_TEXT = `Open a file. Write. Save.
 
 That is still the whole product.
 
-Need an agent? Start with --enable-agent.
-It reads the live buffer and applies a validated edit.
-It does not save.`;
+Need an agent? Start with --explore-agent.
+It reads the live buffer without changing it.
+Choose Agent → Edit to allow validated edits.`;
 
-const START_CMD = `ravnpad --enable-agent notes.txt`;
+const START_CMD = `ravnpad --explore-agent notes.txt`;
 
 const STATUS_CMD = `ravnpad-cli document status --instance INSTANCE_ID --json`;
 
@@ -56,10 +56,11 @@ const PATCH_JSON = `{
 const AGENT_INSTRUCTIONS = `RavnPad is a notepad, not an IDE. Agent access is opt-in and local.
 
 Rules:
-- Only talk to a RavnPad process started with --enable-agent.
+- Only talk to a RavnPad process with Agent set to Explore or Edit (or started with --explore-agent / --enable-agent).
 - Use ravnpad-cli or ravnpad-mcp. Do not write the open file on disk to "help".
 - The live buffer is not the file. Unsaved edits exist only in the editor.
-- Workflow: document status → document read → document propose.
+- Workflow: document status → document read. Only use document propose when the user has selected Agent → Edit.
+- Explore permits status and live-buffer reads. A proposal returns read_only without changing document state. The agent cannot upgrade access.
 - Propose a UTF-8 byte patch. RavnPad applies it directly when its document ID, revision, buffer hash, ranges, and expected text still match.
 - A valid patch is one undoable edit to the buffer and does not save the file. If validation fails, reread the live buffer and merge against the current text.
 - Direct file access is separate and read-only: ravnpad-cli file read PATH --json.
@@ -139,15 +140,15 @@ const FEATURES = [
 const AGENT_POINTS = [
   {
     title: "The notepad stays a notepad",
-    body: "Most AI editors become a chat with a text area attached. RavnPad does the opposite: the editor is the product. Agent access is a flag you turn on for this process only.",
+    body: "Most AI editors become a chat with a text area attached. RavnPad does the opposite: the editor is the product. Choose Off, Explore, or Edit for this process only.",
   },
   {
     title: "Live buffer, not the disk",
     body: "Agents read what you are looking at, including unsaved edits. They never fall back to the file on disk. Closing the window, opening another document, or restarting drops the handle.",
   },
   {
-    title: "Validated direct edits.",
-    body: "A patch is bound to the document revision, buffer hash, ranges, and expected text. RavnPad applies a valid patch as one undoable edit without saving; stale or ambiguous patches are rejected for the agent to reread and merge.",
+    title: "Read first, edit explicitly",
+    body: "Explore exposes the live buffer but rejects changes. Edit permits revision-bound patches. A valid patch is one undoable edit without saving; stale or ambiguous patches are rejected.",
   },
   {
     title: "Local, owner-only",

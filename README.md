@@ -19,9 +19,9 @@ Open a file. Write. Save.
 
 That is still the whole product.
 
-Need an agent? Start with `--enable-agent`.
-It reads the live buffer and applies a validated edit.
-It does not save.
+Need an agent? Choose **Agent → Explore** for read access, or start with `--explore-agent`.
+Choose **Agent → Edit** when you want it to apply a validated edit.
+It never saves automatically.
 
 Word is for documents. The web is for everything else. RavnPad is for the file in front of you: a log, a note, a dump, a `.txt`. It starts instantly, stays out of the way, and does not try to become an IDE.
 
@@ -37,13 +37,16 @@ Word is for documents. The web is for everything else. RavnPad is for the file i
 
 ## Agents that ask first
 
-Most AI editors become a chat with a text area attached. RavnPad does the opposite: the notepad stays a notepad. Turn on agent access for the current process from **Agent → Enable agent mode**, or start RavnPad with `--enable-agent`.
+Most AI editors become a chat with a text area attached. RavnPad does the opposite: the notepad stays a notepad. Agent access is controlled for the current process from **Agent → Off / Explore / Edit**. RavnPad starts at Off; the mode is not saved as a preference. Use `--explore-agent` to start in Explore or the compatible `--enable-agent` flag to start in Edit. If both are present, Explore wins.
 
-- **Live buffer, not the disk.** The agent reads what you are looking at, including unsaved edits. It never falls back to the file on disk. Valid edits are applied directly; stale or ambiguous edits are rejected so the agent can reread and merge against the current text.
+- **Explore is read-only for the agent.** The agent reads what you are looking at, including unsaved edits, while you keep editing and saving normally. Change requests return `read_only` and cannot alter the buffer, revision, dirty state, undo history, or pending proposals.
+- **Edit is explicit.** Switching to Edit keeps the same connection and document identity, but permits validated proposals. Switching back to Explore rejects pending proposals; Off closes and removes the local endpoint. The agent cannot upgrade its own access.
 - **Validated direct edits.** Every patch is bound to the document revision, buffer hash, and expected text. A valid patch becomes one undoable edit and still does not save; a stale or ambiguous patch is rejected for the agent to reread and merge.
 - **Local, owner-only.** Windows uses an owner-only named pipe (remote clients are rejected). macOS and Linux use a private Unix socket. No cloud sidecar, no always-on daemon.
 
 ```bash
+ravnpad --explore-agent notes.txt
+# Choose Agent → Edit before proposing, or start with:
 ravnpad --enable-agent notes.txt
 ravnpad-cli document status --instance INSTANCE_ID --json
 ravnpad-cli document read --instance INSTANCE_ID --document DOCUMENT_ID --json

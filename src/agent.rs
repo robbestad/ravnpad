@@ -106,6 +106,7 @@ impl ApiError {
 
     pub fn document(error: document::Error) -> Self {
         let code = match error {
+            document::Error::ReadOnlyAccess => "read_only",
             document::Error::WrongDocument => "wrong_document",
             document::Error::StaleRevision { .. } => "stale_revision",
             document::Error::HashMismatch => "hash_mismatch",

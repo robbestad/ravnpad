@@ -8,7 +8,8 @@ static NSScrollView *scroll;
 static NSTextView *editor;
 static NSTextField *statusLabel;
 static NSSlider *filePosition;
-static BOOL updating, busy, readonlyDocument, largeDocument, smokeTest, terminationPending, currentAgent;
+static BOOL updating, busy, readonlyDocument, largeDocument, smokeTest, terminationPending;
+static int currentAgent;
 static NSString *largeQuery;
 static BOOL largeMatchCase, largeWholeWord;
 static NSString *currentFont;
@@ -58,7 +59,7 @@ static NSMenuItem *item(NSMenu *menu, NSString *title, SEL action, NSString *key
     NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
     entry.target = target; entry.tag = tag; [menu addItem:entry]; return entry;
 }
-static void command(NSMenu *menu, int id, NSString *key) { item(menu, L(id), @selector(command:), key, delegate, id); }
+static NSMenuItem *command(NSMenu *menu, int id, NSString *key) { return item(menu, L(id), @selector(command:), key, delegate, id); }
 static NSMenu *submenu(NSMenu *bar, NSString *title) {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:title];
     NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
@@ -108,10 +109,9 @@ void rp_rebuild_menus(void) {
     item(view,L(RP_MINIMIZE),@selector(performMiniaturize:),@"m",nil,0);
     item(view,L(RP_ZOOM),@selector(performZoom:),@"",nil,0);
     NSMenu *agent = submenu(bar,L(RP_AGENT));
-    if(currentAgent) {
-        NSMenuItem *active = item(agent,L(RP_AGENT_ENABLED),@selector(command:),@"",delegate,RP_AGENT_ENABLED); active.enabled=NO;
-        command(agent,RP_DISABLE_AGENT,@"");
-    } else command(agent,RP_ENABLE_AGENT,@"");
+    NSMenuItem *off = command(agent,RP_AGENT_OFF,@""); off.state=currentAgent==0 ? NSControlStateValueOn : NSControlStateValueOff;
+    NSMenuItem *explore = command(agent,RP_AGENT_EXPLORE,@""); explore.state=currentAgent==1 ? NSControlStateValueOn : NSControlStateValueOff;
+    NSMenuItem *editAgent = command(agent,RP_AGENT_EDIT,@""); editAgent.state=currentAgent==2 ? NSControlStateValueOn : NSControlStateValueOff;
     [agent addItem:NSMenuItem.separatorItem]; command(agent,RP_AGENT_HELP,@"");
     NSMenu *help = submenu(bar,L(RP_HELP)); command(help,RP_UPDATE,@""); NSApp.helpMenu=help;
     NSApp.mainMenu=bar;
@@ -201,7 +201,7 @@ void rp_rebuild_menus(void) {
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
-    if (item.action==@selector(command:)) return !busy && item.tag!=RP_AGENT_ENABLED && !(item.tag==RP_ENABLE_AGENT && currentAgent) && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
+    if (item.action==@selector(command:)) return !busy && (!(item.tag==RP_SAVE || item.tag==RP_SAVE_AS) || !readonlyDocument);
     if (item.action==@selector(findDocument:)) return !busy;
     if (largeDocument && item.action==@selector(performTextFinderAction:)) return NO;
     return YES;
@@ -317,10 +317,9 @@ void rp_theme(int preference) {
     NSApp.appearance=appearance;
     if(delegate.settings.visible) [delegate.themes selectItemAtIndex:preference];
 }
-void rp_agent(int enabled) {
-    BOOL active=enabled!=0;
-    if(currentAgent==active) return;
-    currentAgent=active;
+void rp_agent(int mode) {
+    if(currentAgent==mode) return;
+    currentAgent=mode;
     rp_rebuild_menus();
 }
 double rp_read_position(void) {
