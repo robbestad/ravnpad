@@ -98,10 +98,42 @@ fn run_egui() -> eframe::Result {
 }
 
 fn initial_path() -> Option<PathBuf> {
-    std::env::args_os()
-        .skip(1)
-        .find(|arg| arg != "--enable-agent")
+    initial_path_from(std::env::args_os().skip(1))
+}
+
+fn initial_path_from(
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> Option<PathBuf> {
+    args.into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .find(|arg| arg != "--enable-agent" && arg != "--explore-agent")
         .map(PathBuf::from)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AgentMode {
+    #[default]
+    Off,
+    Explore,
+    Edit,
+}
+
+impl AgentMode {
+    fn requested_from(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Self {
+        let mut explore = false;
+        let mut edit = false;
+        for arg in args {
+            explore |= arg.as_ref() == "--explore-agent";
+            edit |= arg.as_ref() == "--enable-agent";
+        }
+        if explore {
+            Self::Explore
+        } else if edit {
+            Self::Edit
+        } else {
+            Self::Off
+        }
+    }
 }
 
 fn apply_theme(ctx: &egui::Context, theme: prefs::ThemePref) {
@@ -177,7 +209,8 @@ struct RavnPad {
     document_generation: u64,
     document: document::Document,
     agent: Option<agent::Server>,
-    agent_requested: bool,
+    agent_mode: AgentMode,
+    agent_requested: AgentMode,
     pending_agent: std::collections::VecDeque<String>,
     close_requested: bool,
     text: String,
@@ -262,7 +295,7 @@ impl RavnPad {
         let (file_tx, file_rx) = mpsc::channel();
 
         let document = document::Document::new("", large::EDIT_LIMIT as usize);
-        let agent_requested = std::env::args_os().any(|arg| arg == "--enable-agent");
+        let agent_requested = AgentMode::requested_from(std::env::args_os().skip(1));
         let mut app = Self {
             file_tx,
             file_rx,
@@ -276,6 +309,7 @@ impl RavnPad {
             document_generation: 0,
             document,
             agent: None,
+            agent_mode: AgentMode::Off,
             agent_requested,
             pending_agent: std::collections::VecDeque::new(),
             close_requested: false,
@@ -333,8 +367,8 @@ impl RavnPad {
 
         if let Some(path) = initial {
             app.open_path(path);
-        } else if app.agent_requested {
-            app.start_agent();
+        } else if app.agent_requested != AgentMode::Off {
+            app.start_agent(app.agent_requested);
         }
 
         app
@@ -647,19 +681,39 @@ impl RavnPad {
         self.cache_valid = true;
     }
 
-    fn start_agent(&mut self) {
-        self.agent_requested = false;
+    fn start_agent(&mut self, mode: AgentMode) {
+        debug_assert!(mode != AgentMode::Off);
+        self.agent_requested = AgentMode::Off;
+        if self.agent.is_some() {
+            self.set_agent_mode(mode);
+            return;
+        }
         match agent::Server::start(&self.document.identity().instance_id, self.ctx.clone()) {
-            Ok(server) => self.agent = Some(server),
+            Ok(server) => {
+                self.agent = Some(server);
+                self.agent_mode = mode;
+            }
             Err(error) => self.error = Some(AppError::Settings(error)),
         }
     }
 
-    fn stop_agent(&mut self) {
-        self.pending_agent.clear();
-        self.document.reject_pending();
-        self.agent = None;
-        self.agent_requested = false;
+    fn set_agent_mode(&mut self, mode: AgentMode) {
+        if mode == self.agent_mode {
+            return;
+        }
+        if mode == AgentMode::Off {
+            self.pending_agent.clear();
+            self.document.reject_pending();
+            self.agent = None;
+        } else if self.agent_mode == AgentMode::Off {
+            self.start_agent(mode);
+            return;
+        } else if self.agent_mode == AgentMode::Edit && mode == AgentMode::Explore {
+            self.pending_agent.clear();
+            self.document.reject_pending();
+        }
+        self.agent_mode = mode;
+        self.agent_requested = AgentMode::Off;
     }
 
     fn agent_helper_path(name: &str) -> String {
@@ -691,11 +745,15 @@ impl RavnPad {
         let norwegian = matches!(self.prefs.lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk);
         let cli = Self::agent_helper_path("ravnpad-cli");
         let mcp = Self::agent_helper_path("ravnpad-mcp");
-        let state = match (norwegian, self.agent.is_some()) {
-            (true, true) => "AKTIV — lokale agenter kan finne dette vinduet",
-            (true, false) => "INAKTIV — vinduet eksponerer ikke dokumentet",
-            (false, true) => "ACTIVE — local agents can discover this window",
-            (false, false) => "INACTIVE — this window does not expose a document endpoint",
+        let state = match (norwegian, self.agent_mode) {
+            (true, AgentMode::Explore) => "UTFORSK — agenten kan lese, men ikke endre dokumentet",
+            (true, AgentMode::Edit) => "REDIGER — agenten kan lese og sende validerte endringer",
+            (true, AgentMode::Off) => "AV — vinduet eksponerer ikke dokumentet",
+            (false, AgentMode::Explore) => {
+                "EXPLORE — the agent can read but cannot change the document"
+            }
+            (false, AgentMode::Edit) => "EDIT — the agent can read and submit validated changes",
+            (false, AgentMode::Off) => "OFF — this window does not expose a document endpoint",
         };
         let commands = format!(
             "\"{cli}\" document status --instance {} --json\n\"{cli}\" document read --instance {} --document {} --json\n\"{cli}\" document propose --instance {} --document {} --stdin --json",
@@ -707,12 +765,12 @@ impl RavnPad {
         );
         if norwegian {
             format!(
-                "Status: {state}\n\nSlik finner agenten vinduet\nRavnPad skriver en eierbeskyttet endpoint-fil i:\n{directory}\n\nFilnavnet er instance-ID-en. Agenten finner filen lokalt og bruker deretter document status for å få ID-en til dokumentet som er åpent nå.\n\nInstance-ID:\n{}\n\nGjeldende document-ID:\n{}\n\nCLI-eksempel\n{commands}\n\nForslaget til den siste kommandoen sendes som patch-JSON på stdin. MCP-klienter kan starte:\n\"{mcp}\"\nDette tilbyr de samme status-, read- og propose-operasjonene over stdio.\n\nBare lokale prosesser under din brukerkonto får tilgang. Når agentmodus deaktiveres eller RavnPad lukkes, fjernes endpointen. Når et annet dokument åpnes, blir denne document-ID-en ugyldig.",
+                "Status: {state}\n\nBruk Agent → Utforsk for lesetilgang, Agent → Rediger for å gi endringstilgang, og Agent → Av for å trekke tilbake all tilgang. Agenten kan ikke endre modus selv.\n\nSlik finner agenten vinduet\nRavnPad skriver en eierbeskyttet endpoint-fil i:\n{directory}\n\nFilnavnet er instance-ID-en. Agenten finner filen lokalt og bruker deretter document status for å få ID-en til dokumentet som er åpent nå.\n\nInstance-ID:\n{}\n\nGjeldende document-ID:\n{}\n\nCLI-eksempel\n{commands}\n\nForslaget til den siste kommandoen sendes som patch-JSON på stdin og krever Rediger-modus. MCP-klienter kan starte:\n\"{mcp}\"\nDette tilbyr de samme status-, read- og propose-operasjonene over stdio.\n\nBare lokale prosesser under din brukerkonto får tilgang. Når agenttilgangen slås av eller RavnPad lukkes, fjernes endpointen. Når et annet dokument åpnes, blir denne document-ID-en ugyldig.",
                 identity.instance_id, identity.document_id,
             )
         } else {
             format!(
-                "Status: {state}\n\nHow an agent finds this window\nRavnPad writes an owner-only endpoint file in:\n{directory}\n\nThe filename is the instance ID. The agent discovers it locally, then uses document status to resolve the ID of the document that is open now.\n\nInstance ID:\n{}\n\nCurrent document ID:\n{}\n\nCLI example\n{commands}\n\nThe final command receives the proposed patch JSON on stdin. MCP clients can start:\n\"{mcp}\"\nThis exposes the same status, read, and propose operations over stdio.\n\nOnly local processes running as your user can connect. Deactivating agent mode or closing RavnPad removes the endpoint. Opening another document invalidates this document ID.",
+                "Status: {state}\n\nUse Agent → Explore for read access, Agent → Edit to grant change access, and Agent → Off to revoke all access. The agent cannot change this mode itself.\n\nHow an agent finds this window\nRavnPad writes an owner-only endpoint file in:\n{directory}\n\nThe filename is the instance ID. The agent discovers it locally, then uses document status to resolve the ID of the document that is open now.\n\nInstance ID:\n{}\n\nCurrent document ID:\n{}\n\nCLI example\n{commands}\n\nThe final command receives the proposed patch JSON on stdin and requires Edit mode. MCP clients can start:\n\"{mcp}\"\nThis exposes the same status, read, and propose operations over stdio.\n\nOnly local processes running as your user can connect. Turning agent access off or closing RavnPad removes the endpoint. Opening another document invalidates this document ID.",
                 identity.instance_id, identity.document_id,
             )
         }
@@ -721,6 +779,17 @@ impl RavnPad {
     fn replace_document(&mut self) {
         self.pending_agent.clear();
         self.document.replace_document(&self.text);
+    }
+
+    fn require_agent_edit_access(&self) -> Result<(), agent::ApiError> {
+        if self.agent_mode == AgentMode::Edit {
+            Ok(())
+        } else {
+            Err(agent::ApiError::new(
+                "read_only",
+                "agent access only permits reading; choose Agent > Edit in RavnPad to allow changes",
+            ))
+        }
     }
 
     fn poll_agent(&mut self, edits_allowed: bool) -> Option<document::Proposal> {
@@ -805,7 +874,7 @@ impl RavnPad {
                             document::ExternalState::Unknown,
                             read_only,
                             true,
-                            true,
+                            self.agent_mode == AgentMode::Edit,
                         )
                     } else {
                         self.document.ranged_snapshot(
@@ -818,6 +887,10 @@ impl RavnPad {
                     request.respond(agent::bounded_snapshot_response(snapshot));
                 }
                 agent::Request::DocumentPropose { patch, .. } => {
+                    if let Err(error) = self.require_agent_edit_access() {
+                        request.respond(agent::Response::Error { error });
+                        continue;
+                    }
                     if !edits_allowed
                         || self.file_busy
                         || matches!(self.update, UpdateUi::Downloading)
@@ -898,6 +971,10 @@ impl RavnPad {
     }
 
     fn approve_agent_proposal(&mut self, operation_id: &str) -> Result<String, document::Error> {
+        if self.agent_mode != AgentMode::Edit {
+            self.document.reject_pending();
+            return Err(document::Error::ReadOnlyAccess);
+        }
         let text = self.document.approve(operation_id, &self.text)?;
         self.text.clone_from(&text);
         self.document.finish_approval(operation_id, &text)?;
@@ -1376,8 +1453,8 @@ impl RavnPad {
         if opened {
             self.record_recent(&recent_path);
         }
-        if self.agent_requested {
-            self.start_agent();
+        if self.agent_requested != AgentMode::Off {
+            self.start_agent(self.agent_requested);
         }
         self.spell_dirty = true;
         self.cache_valid = false;
@@ -1793,14 +1870,12 @@ impl eframe::App for RavnPad {
                     self.settings_open = true;
                 }
                 ui.menu_button(t.agent_menu, |ui| {
-                    if self.agent.is_some() {
-                        ui.label(t.agent_enabled);
-                        if ui.button(self.prefs.lang.disable_agent()).clicked() {
-                            self.stop_agent();
-                            ui.close();
-                        }
-                    } else if ui.button(t.enable_agent).clicked() {
-                        self.start_agent();
+                    let mut mode = self.agent_mode;
+                    ui.radio_value(&mut mode, AgentMode::Off, self.prefs.lang.agent_off());
+                    ui.radio_value(&mut mode, AgentMode::Explore, t.enable_agent);
+                    ui.radio_value(&mut mode, AgentMode::Edit, t.agent_enabled);
+                    if mode != self.agent_mode {
+                        self.set_agent_mode(mode);
                         ui.close();
                     }
                     ui.separator();
@@ -2452,7 +2527,8 @@ mod tests {
             document_generation: 0,
             document: document::Document::new("", large::EDIT_LIMIT as usize),
             agent: None,
-            agent_requested: false,
+            agent_mode: AgentMode::Off,
+            agent_requested: AgentMode::Off,
             pending_agent: std::collections::VecDeque::new(),
             close_requested: false,
             text: String::new(),
@@ -2499,6 +2575,177 @@ mod tests {
             pending_opens: std::collections::VecDeque::new(),
         };
         app
+    }
+
+    #[test]
+    fn startup_flags_select_access_and_are_not_treated_as_paths() {
+        use super::*;
+        assert_eq!(AgentMode::requested_from([] as [&str; 0]), AgentMode::Off);
+        assert_eq!(
+            AgentMode::requested_from(["--explore-agent"]),
+            AgentMode::Explore
+        );
+        assert_eq!(
+            AgentMode::requested_from(["--enable-agent"]),
+            AgentMode::Edit
+        );
+        assert_eq!(
+            AgentMode::requested_from(["--enable-agent", "--explore-agent"]),
+            AgentMode::Explore
+        );
+        assert_eq!(
+            initial_path_from(["--explore-agent", "notes.txt"]),
+            Some(PathBuf::from("notes.txt"))
+        );
+        assert_eq!(
+            initial_path_from(["--enable-agent", "notes.txt"]),
+            Some(PathBuf::from("notes.txt"))
+        );
+        assert_eq!(
+            initial_path_from(["--enable-agent", "--explore-agent"]),
+            None
+        );
+    }
+
+    #[test]
+    fn explore_reads_live_unsaved_text_without_advertising_propose() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path());
+        app.saved_text = "saved".into();
+        app.text = "saved plus an unsaved thought".into();
+        app.agent_mode = AgentMode::Explore;
+        app.refresh_document();
+        let snapshot = app.document.snapshot(
+            &app.text,
+            Some(&app.saved_text),
+            app.is_dirty(),
+            document::ExternalState::Unknown,
+            false,
+            true,
+            app.agent_mode == AgentMode::Edit,
+        );
+        assert_eq!(snapshot.text, app.text);
+        assert!(snapshot.dirty);
+        assert_eq!(snapshot.capabilities, vec!["read"]);
+        assert!(!snapshot.read_only);
+    }
+
+    #[test]
+    fn explore_rejects_changes_before_a_proposal_is_registered() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path());
+        app.text = "original".into();
+        app.saved_text = "original".into();
+        app.refresh_document();
+        let revision = app.document.identity().revision;
+        let dirty = app.is_dirty();
+        app.agent_mode = AgentMode::Explore;
+        let error = app.require_agent_edit_access().unwrap_err();
+        assert_eq!(error.code, "read_only");
+        assert_eq!(app.text, "original");
+        assert_eq!(app.document.identity().revision, revision);
+        assert_eq!(app.is_dirty(), dirty);
+        assert!(app.document.proposal_status("not-registered").is_none());
+    }
+
+    #[test]
+    fn downgrading_rejects_pending_proposals_and_rechecks_application_access() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path());
+        app.text = "before".into();
+        app.saved_text = "before".into();
+        app.refresh_document();
+        app.agent_mode = AgentMode::Edit;
+        let patch = document::Patch {
+            operation_id: "queued-change".into(),
+            document_id: app.document.identity().document_id.clone(),
+            base_revision: app.document.identity().revision,
+            base_hash: document::hash(&app.text),
+            edits: vec![document::Edit {
+                start_byte: 0,
+                end_byte: 6,
+                expected_text: "before".into(),
+                replacement: "after".into(),
+            }],
+        };
+        app.document.propose(patch, &app.text).unwrap();
+        app.pending_agent.push_back("queued-change".into());
+        app.set_agent_mode(AgentMode::Explore);
+        assert!(app.pending_agent.is_empty());
+        assert_eq!(
+            app.document.proposal_status("queued-change"),
+            Some(document::ProposalStatus::Rejected)
+        );
+        assert!(matches!(
+            app.approve_agent_proposal("queued-change"),
+            Err(document::Error::ReadOnlyAccess)
+        ));
+        assert_eq!(app.text, "before");
+        assert!(!app.is_dirty());
+    }
+
+    #[test]
+    fn edit_applies_without_saving_can_be_undone_and_document_switch_invalidates_id() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "before").unwrap();
+        let mut app = test_app(dir.path());
+        app.path = Some(path.clone());
+        app.text = "before".into();
+        app.saved_text = "before".into();
+        app.refresh_document();
+        app.agent_mode = AgentMode::Edit;
+        let old_document_id = app.document.identity().document_id.clone();
+        let patch = document::Patch {
+            operation_id: "edit-mode-change".into(),
+            document_id: old_document_id.clone(),
+            base_revision: app.document.identity().revision,
+            base_hash: document::hash(&app.text),
+            edits: vec![document::Edit {
+                start_byte: 0,
+                end_byte: 6,
+                expected_text: "before".into(),
+                replacement: "after".into(),
+            }],
+        };
+        app.document.propose(patch, &app.text).unwrap();
+        app.approve_agent_proposal("edit-mode-change").unwrap();
+        app.refresh_document();
+        assert_eq!(app.text, "after");
+        assert!(app.is_dirty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+
+        // Native/egui undo restores the previous buffer; observing it creates a
+        // new revision and returns the normal dirty state to the saved baseline.
+        app.text = "before".into();
+        app.cache_valid = false;
+        app.refresh_document();
+        assert!(!app.is_dirty());
+        assert!(app.document.identity().revision >= 2);
+
+        app.replace_document();
+        assert_ne!(app.document.identity().document_id, old_document_id);
+        let stale_patch = document::Patch {
+            operation_id: "old-document-change".into(),
+            document_id: old_document_id,
+            base_revision: 0,
+            base_hash: document::hash(&app.text),
+            edits: vec![document::Edit {
+                start_byte: 0,
+                end_byte: 0,
+                expected_text: String::new(),
+                replacement: "x".into(),
+            }],
+        };
+        assert!(matches!(
+            app.document.propose(stale_patch, &app.text),
+            Err(document::Error::WrongDocument)
+        ));
+        assert_eq!(app.agent_mode, AgentMode::Edit);
     }
 
     #[cfg(any(target_os = "macos", windows))]

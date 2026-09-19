@@ -103,8 +103,8 @@ void rp_rebuild_menus(void) {
     if(currentTheme>=0) CheckMenuRadioItem(themeMenu,RP_THEME_SYSTEM,RP_THEME_DARK,RP_THEME_SYSTEM+currentTheme,MF_BYCOMMAND);
     HMENU languages=submenu(settings,RP_LANGUAGE); for(int i=0;i<15;i++) entry(languages,100+i,NULL);
     HMENU agent=submenu(menu,RP_AGENT);
-    if(currentAgent) { entry(agent,RP_AGENT_ENABLED,NULL); EnableMenuItem(agent,RP_AGENT_ENABLED,MF_BYCOMMAND|MF_GRAYED); entry(agent,RP_DISABLE_AGENT,NULL); }
-    else entry(agent,RP_ENABLE_AGENT,NULL);
+    entry(agent,RP_AGENT_OFF,NULL); entry(agent,RP_AGENT_EXPLORE,NULL); entry(agent,RP_AGENT_EDIT,NULL);
+    CheckMenuRadioItem(agent,RP_AGENT_OFF,RP_AGENT_EDIT,RP_AGENT_OFF+currentAgent,MF_BYCOMMAND);
     AppendMenuW(agent,MF_SEPARATOR,0,NULL); entry(agent,RP_AGENT_HELP,NULL);
     HMENU help=submenu(menu,RP_HELP); entry(help,RP_UPDATE,NULL); entry(help,RP_ABOUT,NULL);
     SetMenu(window,menu); DrawMenuBar(window); if(previous) DestroyMenu(previous);
@@ -557,9 +557,9 @@ void rp_theme(int preference) {
     apply_colors();
     if(themeMenu) CheckMenuRadioItem(themeMenu,RP_THEME_SYSTEM,RP_THEME_DARK,RP_THEME_SYSTEM+preference,MF_BYCOMMAND);
 }
-void rp_agent(int enabled) {
-    if(currentAgent==enabled) return;
-    currentAgent=enabled;
+void rp_agent(int mode) {
+    if(currentAgent==mode) return;
+    currentAgent=mode;
     rp_rebuild_menus();
 }
 double rp_read_position(void) {
