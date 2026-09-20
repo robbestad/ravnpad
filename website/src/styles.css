@@ -87,7 +87,7 @@ pre code { font: inherit; }
 .dl-card strong { font-size: 21px; letter-spacing: -.03em; }
 .dl-file { font-size: 10px; font-family: var(--mono); overflow-wrap: anywhere; }
 .dl-hint { color: #777; font-size: 12px; }
-.macos-note, .source { font-size: 13px; color: #777; }
+.macos-note, .source { font-size: 13px; color: #666; }
 footer { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 24px; padding: 32px 4%; }
 .foot-copy p { margin: 0; color: #888; font-size: 11px; }
 .svenjs-credit { display: flex; align-items: center; gap: 8px; text-decoration: none; }
