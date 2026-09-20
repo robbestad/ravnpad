@@ -112,7 +112,7 @@ void rp_rebuild_menus(void) {
     NSMenuItem *off = command(agent,RP_AGENT_OFF,@""); off.state=currentAgent==0 ? NSControlStateValueOn : NSControlStateValueOff;
     NSMenuItem *explore = command(agent,RP_AGENT_EXPLORE,@""); explore.state=currentAgent==1 ? NSControlStateValueOn : NSControlStateValueOff;
     NSMenuItem *editAgent = command(agent,RP_AGENT_EDIT,@""); editAgent.state=currentAgent==2 ? NSControlStateValueOn : NSControlStateValueOff;
-    [agent addItem:NSMenuItem.separatorItem]; command(agent,RP_AGENT_HELP,@"");
+    [agent addItem:NSMenuItem.separatorItem]; command(agent,RP_AGENT_HELP,@""); command(agent,RP_COPY_AGENT_INFO,@"");
     NSMenu *help = submenu(bar,L(RP_HELP)); command(help,RP_UPDATE,@""); NSApp.helpMenu=help;
     NSApp.mainMenu=bar;
 }
@@ -168,6 +168,7 @@ void rp_rebuild_menus(void) {
     [NSTimer scheduledTimerWithTimeInterval:0.15 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     rp_tick();
 }
+
 - (void)tick:(NSTimer *)timer { (void)timer; rp_tick(); }
 - (void)textDidChange:(NSNotification *)notification { (void)notification; if (!updating) { window.documentEdited=YES; rp_changed(); } }
 - (void)command:(NSMenuItem *)sender { rp_action((int)sender.tag); rp_tick(); }
@@ -230,6 +231,12 @@ void rp_rebuild_menus(void) {
     [self.settings center]; [self.settings makeKeyAndOrderFront:nil];
 }
 @end
+
+int rp_set_clipboard(const char *value) {
+    NSPasteboard *pasteboard=NSPasteboard.generalPasteboard;
+    [pasteboard clearContents];
+    return [pasteboard setString:S(value) forType:NSPasteboardTypeString] ? 1 : 0;
+}
 
 void rp_run(void) { @autoreleasepool { [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; delegate=[RavnDelegate new]; NSApp.delegate=delegate; [NSApp run]; } }
 void rp_document(const char *text,size_t length,int readonly) {

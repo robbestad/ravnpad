@@ -776,6 +776,49 @@ impl RavnPad {
         }
     }
 
+    fn agent_connection_text(&self) -> String {
+        let identity = self.document.identity();
+        let directory = prefs::config_dir()
+            .map(|path| path.join("agent").display().to_string())
+            .unwrap_or_else(|| "<agent configuration directory>".to_owned());
+        let cli = Self::agent_helper_path("ravnpad-cli");
+        let mcp = Self::agent_helper_path("ravnpad-mcp");
+        let norwegian = matches!(self.prefs.lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk);
+        if norwegian {
+            let state = match self.agent_mode {
+                AgentMode::Explore => "UTFORSK — agenten kan lese, men ikke foreslå endringer",
+                AgentMode::Edit => "REDIGER — agenten kan lese og foreslå endringer",
+                AgentMode::Off => "AV — velg Utforsk eller Rediger i Agent-menyen først",
+            };
+            format!(
+                "Koble til dette åpne RavnPad-dokumentet.\n\nAgentmodus: {state}\nEndpoint-katalog: {directory}\nInstance-ID: {}\nDocument-ID: {}\n\nCLI:\n\"{cli}\" document status --instance {} --json\n\"{cli}\" document read --instance {} --document {} --json\n\"{cli}\" document propose --instance {} --document {} --stdin --json\n\nMCP-server:\n\"{mcp}\"\n\nBruk document propose for å foreslå endringer; ikke skriv direkte til dokumentfilen.",
+                identity.instance_id,
+                identity.document_id,
+                identity.instance_id,
+                identity.instance_id,
+                identity.document_id,
+                identity.instance_id,
+                identity.document_id,
+            )
+        } else {
+            let state = match self.agent_mode {
+                AgentMode::Explore => "EXPLORE — the agent can read but cannot propose changes",
+                AgentMode::Edit => "EDIT — the agent can read and propose changes",
+                AgentMode::Off => "OFF — select Explore or Edit from the Agent menu first",
+            };
+            format!(
+                "Connect to this open RavnPad document.\n\nAgent mode: {state}\nEndpoint directory: {directory}\nInstance ID: {}\nDocument ID: {}\n\nCLI:\n\"{cli}\" document status --instance {} --json\n\"{cli}\" document read --instance {} --document {} --json\n\"{cli}\" document propose --instance {} --document {} --stdin --json\n\nMCP server:\n\"{mcp}\"\n\nUse document propose to suggest changes; do not write directly to the document file.",
+                identity.instance_id,
+                identity.document_id,
+                identity.instance_id,
+                identity.instance_id,
+                identity.document_id,
+                identity.instance_id,
+                identity.document_id,
+            )
+        }
+    }
+
     fn replace_document(&mut self) {
         self.pending_agent.clear();
         self.document.replace_document(&self.text);
@@ -1448,6 +1491,10 @@ impl RavnPad {
                 self.editor_scroll_y = 0.0;
                 self.restore_editor_scroll = true;
             }
+            // Some launchers probe agent mode by passing a path that has not been
+            // created yet. Agent startup still succeeds, so keep that expected
+            // race silent instead of presenting a misleading file-open alert.
+            Err(err) if should_suppress_agent_startup_open_error(self.agent_requested, &err) => {}
             Err(err) => self.error = Some(AppError::File(err)),
         }
         if opened {
@@ -1883,6 +1930,10 @@ impl eframe::App for RavnPad {
                         self.agent_help_open = true;
                         ui.close();
                     }
+                    if ui.button(self.prefs.lang.copy_agent_info()).clicked() {
+                        ui.ctx().copy_text(self.agent_connection_text());
+                        ui.close();
+                    }
                 });
                 ui.add_enabled_ui(self.large.is_none(), |ui| {
                     if ui.button(t.find).clicked() {
@@ -2174,6 +2225,10 @@ impl eframe::App for RavnPad {
                 .show(ctx, |ui| {
                     ui.style_mut().interaction.selectable_labels = true;
                     ui.add(egui::Label::new(self.agent_help_text()).wrap());
+                    ui.add_space(12.0);
+                    if ui.button(self.prefs.lang.copy_agent_info()).clicked() {
+                        ui.ctx().copy_text(self.agent_connection_text());
+                    }
                 });
             self.agent_help_open = open;
         }
@@ -2253,6 +2308,14 @@ impl eframe::App for RavnPad {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.remember_position_and_save();
     }
+}
+
+fn should_suppress_agent_startup_open_error(
+    agent_requested: AgentMode,
+    error: &large::FileError,
+) -> bool {
+    agent_requested != AgentMode::Off
+        && matches!(error, large::FileError::Open(error) if error.kind() == io::ErrorKind::NotFound)
 }
 
 enum UpdateUi {
@@ -2498,8 +2561,39 @@ fn avoid_broken_fullscreen(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_startup_probe_is_silent_only_while_agent_mode_is_pending() {
+        let missing = large::FileError::Open(io::Error::from(io::ErrorKind::NotFound));
+        assert!(should_suppress_agent_startup_open_error(
+            AgentMode::Explore,
+            &missing
+        ));
+        assert!(should_suppress_agent_startup_open_error(
+            AgentMode::Edit,
+            &missing
+        ));
+        assert!(!should_suppress_agent_startup_open_error(
+            AgentMode::Off,
+            &missing
+        ));
+    }
+
+    #[test]
+    fn other_startup_open_errors_are_still_reported() {
+        let denied = large::FileError::Open(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(!should_suppress_agent_startup_open_error(
+            AgentMode::Edit,
+            &denied
+        ));
+        assert!(!should_suppress_agent_startup_open_error(
+            AgentMode::Edit,
+            &large::FileError::InvalidUtf8
+        ));
+    }
+
     fn test_app(dir: &std::path::Path) -> super::RavnPad {
-        use super::*;
         let ctx = egui::Context::default();
         let prefs = prefs::Prefs {
             lang: i18n::Lang::English,

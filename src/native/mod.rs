@@ -34,6 +34,7 @@ unsafe extern "C" {
     fn rp_close();
     fn rp_lock();
     fn rp_cancel_close();
+    fn rp_set_clipboard(text: *const c_char) -> i32;
     fn rp_confirm(
         title: *const c_char,
         body: *const c_char,
@@ -317,6 +318,7 @@ fn labels(lang: i18n::Lang) {
         (54, t.enable_agent),
         (55, t.agent_enabled),
         (56, lang.agent_help()),
+        (57, lang.copy_agent_info()),
     ] {
         labels[id] = c(value);
     }
@@ -539,6 +541,12 @@ impl Native {
                     56 => {
                         let message = self.app.agent_help_text();
                         info(self.app.prefs.lang.agent_help(), &message, self.app.t().ok);
+                    }
+                    57 => {
+                        let message = c(&self.app.agent_connection_text());
+                        unsafe {
+                            rp_set_clipboard(message.as_ptr());
+                        }
                     }
                     7 => {
                         self.app.prefs.spellcheck = !self.app.prefs.spellcheck;
