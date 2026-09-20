@@ -311,10 +311,6 @@ export const App = create<Record<string, never>, AppState>({
         : platform.startsWith("mac")
           ? { href: macUrl, label: macLabel }
           : { href: windowsUrl, label: "Download for Windows" };
-    const secondary =
-      platform === "windows"
-        ? { href: macUrl, label: "Download for Mac" }
-        : { href: windowsUrl, label: "Download for Windows" };
 
     const words = wordCount(demoText);
     const chars = demoText.length;
@@ -344,22 +340,20 @@ export const App = create<Record<string, never>, AppState>({
 
         <section className="hero" id="top">
           <div className="hero-copy">
-            <p className="eyebrow">Windows and macOS</p>
+
             <h1>
-              A fast notepad. <em>Agents that ask first.</em>
+              A little more space.<br />A little less noise.
             </h1>
             <p className="lede">
-              Open a file, write, save. That is still the whole product. When
-              you want an agent in the room, it reads the live buffer and
-              proposes a patch. RavnPad applies it directly when it still matches
-              the live buffer.
+              A native notepad for Mac and Windows.<br />
+              Free, open source, and always yours.
             </p>
             <div className="hero-actions">
               <a className="btn primary" href={primary.href}>
                 {primary.label}
               </a>
-              <a className="btn ghost" href="#agents">
-                Agent instructions
+              <a className="btn ghost" href={GITHUB}>
+                View on GitHub
               </a>
             </div>
             <p className="version">
@@ -371,13 +365,15 @@ export const App = create<Record<string, never>, AppState>({
           </div>
 
           <div className="hero-visual">
-            <img
-              className="app-icon"
-              src="/ravn-logo.png"
-              width="180"
-              height="180"
-              alt="RavnPad icon: a raven holding a fountain pen"
-            />
+            <div className="floating-note note-left" aria-hidden="true">
+              <span className="note-label">JUST THE ESSENTIALS</span>
+              <span>Open.</span><span>Write.</span><span>Save.</span>
+            </div>
+            <div className="floating-note note-right" aria-hidden="true">
+              <img src="/ravn-logo.png" width="76" height="76" alt="" />
+              <strong>Make room for a thought.</strong>
+              <span>No account. No distractions.</span>
+            </div>
             <div className="notepad" aria-label="In-browser notepad demo">
               <div className="notepad-chrome">
                 <span className="traffic" aria-hidden="true">
@@ -419,6 +415,7 @@ export const App = create<Record<string, never>, AppState>({
               </div>
             </div>
           </div>
+          <p className="demo-caption">A small space to try it. Go ahead, write something.</p>
         </section>
 
         <section className="features" id="features">
@@ -441,12 +438,11 @@ export const App = create<Record<string, never>, AppState>({
 
         <section className="agents" id="agents">
           <p className="eyebrow">Opt-in, local, human-gated</p>
-          <h2>What is new about the agent.</h2>
+          <h2>A helping hand. When you want one.</h2>
           <p className="lede tight">
-            Coding agents already write files. Chat apps already rewrite
-            buffers. RavnPad’s agent protocol is built so a notepad can stay
-            a notepad: the model never owns the document, never touches disk,
-            and never applies an edit you have not seen.
+            Keep writing on your own, or invite an agent to help. Explore lets
+            it read your live text. Edit lets it apply validated, undoable changes.
+            You choose the access, and saving stays in your hands.
           </p>
           <div className="feature-grid">
             {AGENT_POINTS.map((point) => (
@@ -457,6 +453,8 @@ export const App = create<Record<string, never>, AppState>({
             ))}
           </div>
 
+          <details className="agent-guide">
+          <summary>Set up your agent <span aria-hidden="true">↗</span></summary>
           <h3 className="subhead">Click to copy</h3>
           <p className="lede tight">
             Paste these into a terminal, an MCP config, or an agent’s
@@ -482,11 +480,13 @@ export const App = create<Record<string, never>, AppState>({
             <code>RavnPad.app/Contents/Helpers/</code>. Point the MCP{" "}
             <code>command</code> at that binary if it is not on your PATH.
           </p>
+          </details>
         </section>
 
         <section className="downloads" id="download">
-          <p className="eyebrow">Get it</p>
-          <h2>Download from GitHub.</h2>
+          <img className="download-icon" src="/ravn-logo.png" width="88" height="88" alt="" />
+          <p className="eyebrow">Yours to keep</p>
+          <h2>Meet your new notepad.</h2>
           <p className="lede tight">
             Prebuilt binaries for the latest release. Unzip and run. The
             files live on GitHub, not on this server.
