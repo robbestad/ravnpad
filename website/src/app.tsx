@@ -3,13 +3,14 @@ import svenjsMark from "./svenjs-mark.svg";
 
 const GITHUB = "https://github.com/robbestad/ravnpad";
 const RELEASES = `${GITHUB}/releases`;
-const LATEST_ASSET = `${RELEASES}/latest/download`;
+const FALLBACK_TAG = "v1.3.16";
+const FALLBACK_ASSET = `${RELEASES}/download/${FALLBACK_TAG}`;
 
 const FALLBACK = {
-  tag: "v1.3.10",
-  windowsUrl: `${LATEST_ASSET}/ravnpad-windows-x86_64.zip`,
-  macArmUrl: `${LATEST_ASSET}/ravnpad-macos-aarch64.zip`,
-  macIntelUrl: `${LATEST_ASSET}/ravnpad-macos-x86_64.zip`,
+  tag: FALLBACK_TAG,
+  windowsUrl: `${FALLBACK_ASSET}/ravnpad-windows-x86_64.zip`,
+  macArmUrl: `${FALLBACK_ASSET}/ravnpad-macos-aarch64.zip`,
+  macIntelUrl: `${FALLBACK_ASSET}/ravnpad-macos-x86_64.zip`,
 };
 
 const DEMO_TEXT = `Open a file. Write. Save.
