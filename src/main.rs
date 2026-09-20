@@ -1491,11 +1491,12 @@ impl RavnPad {
                 self.editor_scroll_y = 0.0;
                 self.restore_editor_scroll = true;
             }
-            // Some launchers probe agent mode by passing a path that has not been
-            // created yet. Agent startup still succeeds, so keep that expected
-            // race silent instead of presenting a misleading file-open alert.
-            Err(err) if should_suppress_agent_startup_open_error(self.agent_requested, &err) => {}
-            Err(err) => self.error = Some(AppError::File(err)),
+            Err(err) => {
+                self.error = Some(AppError::File(err));
+                // Do not start an agent on an unrelated buffer when the requested
+                // document failed to open. Launch without a path for an empty buffer.
+                self.agent_requested = AgentMode::Off;
+            }
         }
         if opened {
             self.record_recent(&recent_path);
@@ -2310,14 +2311,6 @@ impl eframe::App for RavnPad {
     }
 }
 
-fn should_suppress_agent_startup_open_error(
-    agent_requested: AgentMode,
-    error: &large::FileError,
-) -> bool {
-    agent_requested != AgentMode::Off
-        && matches!(error, large::FileError::Open(error) if error.kind() == io::ErrorKind::NotFound)
-}
-
 enum UpdateUi {
     Idle,
     Checking { user: bool },
@@ -2564,33 +2557,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_startup_probe_is_silent_only_while_agent_mode_is_pending() {
-        let missing = large::FileError::Open(io::Error::from(io::ErrorKind::NotFound));
-        assert!(should_suppress_agent_startup_open_error(
-            AgentMode::Explore,
-            &missing
-        ));
-        assert!(should_suppress_agent_startup_open_error(
-            AgentMode::Edit,
-            &missing
-        ));
-        assert!(!should_suppress_agent_startup_open_error(
-            AgentMode::Off,
-            &missing
-        ));
+    fn missing_startup_document_is_reported_in_every_agent_mode() {
+        for mode in [AgentMode::Off, AgentMode::Explore, AgentMode::Edit] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = test_app(&dir.path().join("recovery"));
+            let path = dir.path().join("missing.txt");
+            app.agent_requested = mode;
+            app.text = "existing unsaved text".into();
+
+            app.apply_open(path.clone(), large::open(&path));
+
+            assert!(matches!(
+                app.error,
+                Some(AppError::File(large::FileError::Open(ref error)))
+                    if error.kind() == io::ErrorKind::NotFound
+            ));
+            assert_eq!(app.text, "existing unsaved text");
+            assert!(app.path.is_none());
+            assert!(app.agent.is_none());
+            assert_eq!(app.agent_requested, AgentMode::Off);
+            assert!(app.prefs.recent.is_empty());
+        }
     }
 
     #[test]
     fn other_startup_open_errors_are_still_reported() {
-        let denied = large::FileError::Open(io::Error::from(io::ErrorKind::PermissionDenied));
-        assert!(!should_suppress_agent_startup_open_error(
-            AgentMode::Edit,
-            &denied
-        ));
-        assert!(!should_suppress_agent_startup_open_error(
-            AgentMode::Edit,
-            &large::FileError::InvalidUtf8
-        ));
+        for error in [
+            large::FileError::Open(io::Error::from(io::ErrorKind::PermissionDenied)),
+            large::FileError::InvalidUtf8,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = test_app(&dir.path().join("recovery"));
+            app.agent_requested = AgentMode::Edit;
+
+            app.apply_open(dir.path().join("notes.txt"), Err(error));
+
+            assert!(matches!(app.error, Some(AppError::File(_))));
+            assert!(app.agent.is_none());
+            assert_eq!(app.agent_requested, AgentMode::Off);
+        }
     }
 
     fn test_app(dir: &std::path::Path) -> super::RavnPad {
