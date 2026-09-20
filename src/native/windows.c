@@ -105,9 +105,23 @@ void rp_rebuild_menus(void) {
     HMENU agent=submenu(menu,RP_AGENT);
     entry(agent,RP_AGENT_OFF,NULL); entry(agent,RP_AGENT_EXPLORE,NULL); entry(agent,RP_AGENT_EDIT,NULL);
     CheckMenuRadioItem(agent,RP_AGENT_OFF,RP_AGENT_EDIT,RP_AGENT_OFF+currentAgent,MF_BYCOMMAND);
-    AppendMenuW(agent,MF_SEPARATOR,0,NULL); entry(agent,RP_AGENT_HELP,NULL);
+    AppendMenuW(agent,MF_SEPARATOR,0,NULL); entry(agent,RP_AGENT_HELP,NULL); entry(agent,RP_COPY_AGENT_INFO,NULL);
     HMENU help=submenu(menu,RP_HELP); entry(help,RP_UPDATE,NULL); entry(help,RP_ABOUT,NULL);
     SetMenu(window,menu); DrawMenuBar(window); if(previous) DestroyMenu(previous);
+}
+
+int rp_set_clipboard(const char *value) {
+    wchar_t *converted=wide(value); if(!converted) return 0;
+    size_t bytes=(wcslen(converted)+1)*sizeof(wchar_t);
+    HGLOBAL memory=GlobalAlloc(GMEM_MOVEABLE,bytes);
+    if(!memory) { free(converted); return 0; }
+    void *target=GlobalLock(memory);
+    if(!target) { GlobalFree(memory); free(converted); return 0; }
+    memcpy(target,converted,bytes); GlobalUnlock(memory); free(converted);
+    if(!OpenClipboard(window)) { GlobalFree(memory); return 0; }
+    EmptyClipboard();
+    if(!SetClipboardData(CF_UNICODETEXT,memory)) { CloseClipboard(); GlobalFree(memory); return 0; }
+    CloseClipboard(); return 1;
 }
 static void resize(void) {
     RECT rect; GetClientRect(window,&rect); int bar=MulDiv(28,dpi,96);

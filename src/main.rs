@@ -776,6 +776,49 @@ impl RavnPad {
         }
     }
 
+    fn agent_connection_text(&self) -> String {
+        let identity = self.document.identity();
+        let directory = prefs::config_dir()
+            .map(|path| path.join("agent").display().to_string())
+            .unwrap_or_else(|| "<agent configuration directory>".to_owned());
+        let cli = Self::agent_helper_path("ravnpad-cli");
+        let mcp = Self::agent_helper_path("ravnpad-mcp");
+        let norwegian = matches!(self.prefs.lang, i18n::Lang::Bokmal | i18n::Lang::Nynorsk);
+        if norwegian {
+            let state = match self.agent_mode {
+                AgentMode::Explore => "UTFORSK — agenten kan lese, men ikke foreslå endringer",
+                AgentMode::Edit => "REDIGER — agenten kan lese og foreslå endringer",
+                AgentMode::Off => "AV — velg Utforsk eller Rediger i Agent-menyen først",
+            };
+            format!(
+                "Koble til dette åpne RavnPad-dokumentet.\n\nAgentmodus: {state}\nEndpoint-katalog: {directory}\nInstance-ID: {}\nDocument-ID: {}\n\nCLI:\n\"{cli}\" document status --instance {} --json\n\"{cli}\" document read --instance {} --document {} --json\n\"{cli}\" document propose --instance {} --document {} --stdin --json\n\nMCP-server:\n\"{mcp}\"\n\nBruk document propose for å foreslå endringer; ikke skriv direkte til dokumentfilen.",
+                identity.instance_id,
+                identity.document_id,
+                identity.instance_id,
+                identity.instance_id,
+                identity.document_id,
+                identity.instance_id,
+                identity.document_id,
+            )
+        } else {
+            let state = match self.agent_mode {
+                AgentMode::Explore => "EXPLORE — the agent can read but cannot propose changes",
+                AgentMode::Edit => "EDIT — the agent can read and propose changes",
+                AgentMode::Off => "OFF — select Explore or Edit from the Agent menu first",
+            };
+            format!(
+                "Connect to this open RavnPad document.\n\nAgent mode: {state}\nEndpoint directory: {directory}\nInstance ID: {}\nDocument ID: {}\n\nCLI:\n\"{cli}\" document status --instance {} --json\n\"{cli}\" document read --instance {} --document {} --json\n\"{cli}\" document propose --instance {} --document {} --stdin --json\n\nMCP server:\n\"{mcp}\"\n\nUse document propose to suggest changes; do not write directly to the document file.",
+                identity.instance_id,
+                identity.document_id,
+                identity.instance_id,
+                identity.instance_id,
+                identity.document_id,
+                identity.instance_id,
+                identity.document_id,
+            )
+        }
+    }
+
     fn replace_document(&mut self) {
         self.pending_agent.clear();
         self.document.replace_document(&self.text);
@@ -1448,7 +1491,12 @@ impl RavnPad {
                 self.editor_scroll_y = 0.0;
                 self.restore_editor_scroll = true;
             }
-            Err(err) => self.error = Some(AppError::File(err)),
+            Err(err) => {
+                self.error = Some(AppError::File(err));
+                // Do not start an agent on an unrelated buffer when the requested
+                // document failed to open. Launch without a path for an empty buffer.
+                self.agent_requested = AgentMode::Off;
+            }
         }
         if opened {
             self.record_recent(&recent_path);
@@ -1883,6 +1931,10 @@ impl eframe::App for RavnPad {
                         self.agent_help_open = true;
                         ui.close();
                     }
+                    if ui.button(self.prefs.lang.copy_agent_info()).clicked() {
+                        ui.ctx().copy_text(self.agent_connection_text());
+                        ui.close();
+                    }
                 });
                 ui.add_enabled_ui(self.large.is_none(), |ui| {
                     if ui.button(t.find).clicked() {
@@ -2174,6 +2226,10 @@ impl eframe::App for RavnPad {
                 .show(ctx, |ui| {
                     ui.style_mut().interaction.selectable_labels = true;
                     ui.add(egui::Label::new(self.agent_help_text()).wrap());
+                    ui.add_space(12.0);
+                    if ui.button(self.prefs.lang.copy_agent_info()).clicked() {
+                        ui.ctx().copy_text(self.agent_connection_text());
+                    }
                 });
             self.agent_help_open = open;
         }
@@ -2498,8 +2554,51 @@ fn avoid_broken_fullscreen(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_startup_document_is_reported_in_every_agent_mode() {
+        for mode in [AgentMode::Off, AgentMode::Explore, AgentMode::Edit] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = test_app(&dir.path().join("recovery"));
+            let path = dir.path().join("missing.txt");
+            app.agent_requested = mode;
+            app.text = "existing unsaved text".into();
+
+            app.apply_open(path.clone(), large::open(&path));
+
+            assert!(matches!(
+                app.error,
+                Some(AppError::File(large::FileError::Open(ref error)))
+                    if error.kind() == io::ErrorKind::NotFound
+            ));
+            assert_eq!(app.text, "existing unsaved text");
+            assert!(app.path.is_none());
+            assert!(app.agent.is_none());
+            assert_eq!(app.agent_requested, AgentMode::Off);
+            assert!(app.prefs.recent.is_empty());
+        }
+    }
+
+    #[test]
+    fn other_startup_open_errors_are_still_reported() {
+        for error in [
+            large::FileError::Open(io::Error::from(io::ErrorKind::PermissionDenied)),
+            large::FileError::InvalidUtf8,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = test_app(&dir.path().join("recovery"));
+            app.agent_requested = AgentMode::Edit;
+
+            app.apply_open(dir.path().join("notes.txt"), Err(error));
+
+            assert!(matches!(app.error, Some(AppError::File(_))));
+            assert!(app.agent.is_none());
+            assert_eq!(app.agent_requested, AgentMode::Off);
+        }
+    }
+
     fn test_app(dir: &std::path::Path) -> super::RavnPad {
-        use super::*;
         let ctx = egui::Context::default();
         let prefs = prefs::Prefs {
             lang: i18n::Lang::English,

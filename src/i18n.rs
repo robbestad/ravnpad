@@ -45,6 +45,14 @@ impl Lang {
         }
     }
 
+    pub fn copy_agent_info(self) -> &'static str {
+        match self {
+            Self::Bokmal => "Kopier tilkoblingsinfo",
+            Self::Nynorsk => "Kopier tilkoplingsinfo",
+            _ => "Copy connection info",
+        }
+    }
+
     pub const ALL: &[Self] = &[
         Self::Bokmal,
         Self::Nynorsk,
