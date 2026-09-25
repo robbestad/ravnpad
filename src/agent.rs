@@ -17,6 +17,7 @@ use std::time::Duration;
 pub(crate) const MAX_MESSAGE: usize = 128 * 1024 * 1024;
 const MAX_AGENT_RESPONSE: usize = 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const SAVE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 #[cfg(unix)]
 const MAX_CLIENT_WORKERS: usize = 16;
 
@@ -869,6 +870,17 @@ fn dispatch(
             };
         }
     };
+    let timeout = if matches!(
+        &request,
+        Request::GuiSave { .. }
+            | Request::GuiSaveAs { .. }
+            | Request::DocumentSave { .. }
+            | Request::HostStop { discard: true, .. }
+    ) {
+        SAVE_RESPONSE_TIMEOUT
+    } else {
+        RESPONSE_TIMEOUT
+    };
     let (response_tx, response_rx) = mpsc::channel();
     if tx
         .send(HostRequest {
@@ -883,7 +895,7 @@ fn dispatch(
     }
     wake();
     response_rx
-        .recv_timeout(RESPONSE_TIMEOUT)
+        .recv_timeout(timeout)
         .unwrap_or_else(|_| Response::Error {
             error: ApiError::new("host_timeout", "document host did not respond in time"),
         })

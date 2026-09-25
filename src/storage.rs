@@ -1,6 +1,7 @@
+use sha2::{Digest as _, Sha256};
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::Path,
 };
 
@@ -8,6 +9,51 @@ use std::{
 pub struct SaveOutcome {
     // The replacement has committed even when directory durability cannot be confirmed.
     pub durability_warning: Option<io::Error>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContentFingerprint {
+    len: u64,
+    sha256: [u8; 32],
+}
+
+pub fn fingerprint(path: &Path) -> io::Result<Option<ContentFingerprint>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut hash = Sha256::new();
+    let mut len = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        len += count as u64;
+        hash.update(&buffer[..count]);
+    }
+    Ok(Some(ContentFingerprint {
+        len,
+        sha256: hash.finalize().into(),
+    }))
+}
+
+pub fn save_checked_fingerprint(
+    path: &Path,
+    bytes: &[u8],
+    expected: Option<ContentFingerprint>,
+) -> io::Result<SaveOutcome> {
+    save_with_check(path, bytes, |target| {
+        if fingerprint(target)? != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "File changed outside RavnPad",
+            ));
+        }
+        Ok(())
+    })
 }
 
 // Never truncate the destination. Persist uses the platform's atomic replacement.
@@ -387,6 +433,19 @@ pub fn save_checked(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> io::R
 #[cfg(test)]
 mod conflict_tests {
     use super::*;
+
+    #[test]
+    fn streaming_fingerprint_detects_same_size_external_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large-target");
+        fs::write(&path, vec![b'a'; 2 * 1024 * 1024]).unwrap();
+        let expected = fingerprint(&path).unwrap();
+        fs::write(&path, vec![b'b'; 2 * 1024 * 1024]).unwrap();
+        let error = save_checked_fingerprint(&path, b"replacement", expected).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::metadata(&path).unwrap().len(), 2 * 1024 * 1024);
+    }
+
     #[test]
     fn external_changes_and_deletion_are_not_overwritten() {
         let dir = tempfile::tempdir().unwrap();

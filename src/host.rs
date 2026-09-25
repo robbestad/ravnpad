@@ -118,6 +118,7 @@ pub struct Core {
     pub document: document::Document,
     text: String,
     saved_text: String,
+    recovered_unsaved: bool,
     path: Option<PathBuf>,
     read_only: bool,
     undo: Vec<String>,
@@ -149,6 +150,7 @@ impl Core {
         Ok(Self {
             document: document::Document::new(&text, EDIT_LIMIT),
             saved_text: text.clone(),
+            recovered_unsaved: false,
             text,
             path,
             read_only,
@@ -191,7 +193,7 @@ impl Core {
     }
 
     pub fn dirty(&self) -> bool {
-        self.text != self.saved_text
+        self.recovered_unsaved || self.text != self.saved_text
     }
 
     fn changed(&mut self, text: String) {
@@ -230,6 +232,7 @@ impl Core {
         let outcome =
             storage::save_checked(path, self.text.as_bytes(), Some(self.saved_text.as_bytes()))?;
         self.saved_text.clone_from(&self.text);
+        self.recovered_unsaved = false;
         self.recovery_due = None;
         self.snapshot();
         if let Some(path) = self.recovered_from.take() {
@@ -243,18 +246,19 @@ impl Core {
             return Err(io::Error::other("this document is read-only"));
         }
         let path = std::path::absolute(path)?;
-        let expected = if self.path.as_ref() == Some(&path) {
-            Some(self.saved_text.as_bytes().to_vec())
+        let outcome = if self.path.as_ref() == Some(&path) {
+            storage::save_checked(
+                &path,
+                self.text.as_bytes(),
+                Some(self.saved_text.as_bytes()),
+            )?
         } else {
-            match std::fs::read(&path) {
-                Ok(bytes) => Some(bytes),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error),
-            }
+            let expected = storage::fingerprint(&path)?;
+            storage::save_checked_fingerprint(&path, self.text.as_bytes(), expected)?
         };
-        let outcome = storage::save_checked(&path, self.text.as_bytes(), expected.as_deref())?;
         self.path = Some(path);
         self.saved_text.clone_from(&self.text);
+        self.recovered_unsaved = false;
         self.recovery_due = None;
         self.snapshot();
         if let Some(path) = self.recovered_from.take() {
@@ -270,6 +274,7 @@ impl Core {
         }
         self.text = text;
         self.saved_text.clear();
+        self.recovered_unsaved = true;
         self.path = None;
         self.read_only = false;
         self.undo.clear();
@@ -923,7 +928,12 @@ impl Client {
         value["command"] = command.into();
         value["token"] = self.endpoint.token.clone().into();
         value["session"] = self.session.clone().into();
-        let response = exchange(&self.endpoint.address, &value)?;
+        let timeout = if matches!(command, "gui_save" | "gui_save_as") {
+            Duration::from_secs(10 * 60)
+        } else {
+            Duration::from_secs(30)
+        };
+        let response = exchange_with_timeout(&self.endpoint.address, &value, timeout)?;
         if let Some(state) = response.get("state") {
             self.state = serde_json::from_value(state.clone())?;
         }
@@ -1032,11 +1042,19 @@ impl Drop for Client {
 }
 
 fn exchange(address: &str, request: &serde_json::Value) -> io::Result<serde_json::Value> {
+    exchange_with_timeout(address, request, Duration::from_secs(30))
+}
+
+fn exchange_with_timeout(
+    address: &str,
+    request: &serde_json::Value,
+    timeout: Duration,
+) -> io::Result<serde_json::Value> {
     let bytes = serde_json::to_vec(request)?;
     if bytes.len() > agent::MAX_MESSAGE {
         return Err(io::Error::other("request exceeds transport limit"));
     }
-    let response = exchange_bytes(address, &bytes)?;
+    let response = exchange_bytes(address, &bytes, timeout)?;
     let value: serde_json::Value = serde_json::from_slice(&response)?;
     if value.get("status").and_then(|v| v.as_str()) == Some("error") {
         let message = value
@@ -1058,11 +1076,11 @@ fn exchange(address: &str, request: &serde_json::Value) -> io::Result<serde_json
 }
 
 #[cfg(unix)]
-fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
+fn exchange_bytes(address: &str, bytes: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
     use io::{Read as _, Write as _};
     use std::{net::Shutdown, os::unix::net::UnixStream};
     let mut stream = UnixStream::connect(address)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(timeout))?;
     stream.write_all(bytes)?;
     stream.shutdown(Shutdown::Write)?;
     let mut response = Vec::new();
@@ -1076,7 +1094,7 @@ fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(windows)]
-fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
+fn exchange_bytes(address: &str, bytes: &[u8], _timeout: Duration) -> io::Result<Vec<u8>> {
     use std::os::windows::ffi::OsStrExt as _;
     type Handle = *mut std::ffi::c_void;
     #[link(name = "kernel32")]
@@ -1189,6 +1207,36 @@ fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_recovery_remains_unsaved_until_saved() {
+        let directory = tempfile::tempdir().unwrap();
+        let copy = directory.path().join("empty-recovery.txt");
+        std::fs::write(&copy, "").unwrap();
+        let mut core = Core::new(None, AgentMode::Off).unwrap();
+        core.recovery.finish();
+        core.recovery = recovery::Recovery::start_in(Some(directory.path().join("snapshots")));
+        core.recover(copy).unwrap();
+        assert!(core.dirty());
+        assert!(core.state().dirty);
+        assert!(matches!(
+            core.handle(
+                agent::Request::HostStop {
+                    token: "owner".into(),
+                    discard: false,
+                },
+                "owner",
+                "agent",
+            ),
+            agent::Response::Error { .. }
+        ));
+        core.save_as(directory.path().join("saved.txt")).unwrap();
+        assert!(!core.dirty());
+        assert_eq!(
+            std::fs::read(directory.path().join("saved.txt")).unwrap(),
+            b""
+        );
+    }
 
     #[test]
     fn relative_document_path_is_published_as_absolute() {
