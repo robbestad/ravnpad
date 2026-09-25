@@ -234,6 +234,7 @@ struct RavnPad {
     host_client: Option<host::Client>,
     host_synced_text: String,
     host_conflict_pending: bool,
+    host_oversized: bool,
     host_poll_due: std::time::Instant,
     agent: Option<agent::Server>,
     agent_mode: AgentMode,
@@ -341,6 +342,7 @@ impl RavnPad {
             host_client: None,
             host_synced_text: String::new(),
             host_conflict_pending: false,
+            host_oversized: false,
             host_poll_due: std::time::Instant::now(),
             agent: None,
             agent_mode: AgentMode::Off,
@@ -707,7 +709,18 @@ impl RavnPad {
 
     fn refresh_document(&mut self) {
         if self.host_client.is_some() {
-            let changed = !self.host_conflict_pending && self.text != self.host_synced_text;
+            let oversized =
+                self.text != self.host_synced_text && self.text.len() > large::EDIT_LIMIT as usize;
+            if oversized && !self.host_oversized {
+                self.error = Some(AppError::TooLargeToEdit);
+                let _ = self
+                    .recovery
+                    .tx
+                    .send(recovery::Command::Snapshot(Some(self.text.clone())));
+            }
+            self.host_oversized = oversized;
+            let changed =
+                !self.host_conflict_pending && !oversized && self.text != self.host_synced_text;
             let due = std::time::Instant::now() >= self.host_poll_due;
             if changed || due {
                 let result = if changed {
@@ -722,7 +735,7 @@ impl RavnPad {
                 match result {
                     Ok(Some(state)) => {
                         let state = state.clone();
-                        if !self.host_conflict_pending {
+                        if !self.host_conflict_pending && !oversized {
                             if self.text != state.text
                                 || self.document.identity() != &state.identity
                             {
@@ -741,6 +754,12 @@ impl RavnPad {
                         if changed && error.kind() == io::ErrorKind::WouldBlock {
                             self.preserve_local_host_text();
                             self.resolve_host_conflict();
+                        } else if changed && error.kind() == io::ErrorKind::InvalidInput {
+                            self.error = Some(AppError::TooLargeToEdit);
+                            let _ = self
+                                .recovery
+                                .tx
+                                .send(recovery::Command::Snapshot(Some(self.text.clone())));
                         } else {
                             self.host_connection_failed(error, changed);
                         }
@@ -790,6 +809,7 @@ impl RavnPad {
 
     fn apply_host_state(&mut self, state: &host::HostState) {
         self.host_conflict_pending = false;
+        self.host_oversized = false;
         if !state.read_only {
             self.large = None;
         }
@@ -826,6 +846,7 @@ impl RavnPad {
             client.abandon();
         }
         self.agent_mode = AgentMode::Off;
+        self.host_oversized = false;
         self.cache_valid = false;
         self.error = Some(AppError::Settings(error));
     }
@@ -905,6 +926,7 @@ impl RavnPad {
         self.host_client.take();
         self.host_synced_text.clear();
         self.host_conflict_pending = false;
+        self.host_oversized = false;
         self.agent_mode = AgentMode::Off;
         let client = host::Client::spawn(path, host::AgentMode::Off)?;
         let state = client.state.clone();
@@ -1357,7 +1379,9 @@ impl RavnPad {
     }
 
     fn is_dirty(&self) -> bool {
-        self.dirty || self.host_conflict_pending
+        self.dirty
+            || self.host_conflict_pending
+            || (self.host_client.is_some() && self.text != self.host_synced_text)
     }
 
     fn display_name(&self) -> String {
@@ -1904,6 +1928,10 @@ impl RavnPad {
             return false;
         }
         if let Some(client) = self.host_client.as_mut() {
+            if self.text.len() > large::EDIT_LIMIT as usize {
+                self.error = Some(AppError::TooLargeToEdit);
+                return false;
+            }
             self.file_busy = true;
             let text = self.text.clone();
             if client.state.text != self.text
@@ -1920,36 +1948,17 @@ impl RavnPad {
                 }
                 return false;
             }
-            let result = if client.state.path.as_ref() == Some(&path) {
-                client.save()
-            } else {
-                client.save_as(&path)
-            };
-            if let Err(error) = &result {
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    self.file_busy = false;
-                    self.preserve_local_host_text();
-                    if self.resolve_host_conflict() {
-                        return self.begin_save(path);
-                    }
-                    return false;
-                }
-                if !matches!(
-                    error.kind(),
-                    io::ErrorKind::Other | io::ErrorKind::AlreadyExists
-                ) {
-                    self.file_busy = false;
-                    self.host_connection_failed(
-                        io::Error::new(error.kind(), error.to_string()),
-                        true,
-                    );
-                    return false;
-                }
-            }
-            let result = result.map(|warning| storage::SaveOutcome {
-                durability_warning: warning.map(io::Error::other),
+            let save_as = (client.state.path.as_ref() != Some(&path)).then(|| path.clone());
+            let job = client.save_job(save_as);
+            let tx = self.file_tx.clone();
+            let ctx = self.ctx.clone();
+            thread::spawn(move || {
+                let result = job().map(|warning| storage::SaveOutcome {
+                    durability_warning: warning.map(io::Error::other),
+                });
+                let _ = tx.send(FileEvent::Save(path, text, result));
+                ctx.request_repaint();
             });
-            let _ = self.file_tx.send(FileEvent::Save(path, text, result));
             return true;
         }
         self.file_busy = true;
@@ -2220,7 +2229,9 @@ impl eframe::App for RavnPad {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_recovery();
         self.poll_files();
-        self.refresh_document();
+        if !self.file_busy {
+            self.refresh_document();
+        }
         if let Some(proposal) = self.poll_agent(true) {
             Self::remap_editor_selection(ctx, &proposal);
         }
@@ -2761,9 +2772,23 @@ impl eframe::App for RavnPad {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.host_client.is_some() && self.text != self.host_synced_text {
+            let sent = self.text.len() <= large::EDIT_LIMIT as usize
+                && self
+                    .host_client
+                    .as_mut()
+                    .is_some_and(|client| client.edit(&self.text).is_ok());
+            if !sent {
+                let _ = self
+                    .recovery
+                    .tx
+                    .send(recovery::Command::Snapshot(Some(self.text.clone())));
+            }
+        }
         if let Some(mut client) = self.host_client.take() {
             let _ = client.detach();
         }
+        self.recovery.finish();
         self.remember_position_and_save();
     }
 }
@@ -3151,6 +3176,7 @@ mod tests {
             host_client: None,
             host_synced_text: String::new(),
             host_conflict_pending: false,
+            host_oversized: false,
             host_poll_due: std::time::Instant::now(),
             agent: None,
             agent_mode: AgentMode::Off,

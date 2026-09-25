@@ -996,6 +996,34 @@ impl Client {
             .map(str::to_owned))
     }
 
+    pub fn save_job(
+        &self,
+        save_as: Option<PathBuf>,
+    ) -> impl FnOnce() -> io::Result<Option<String>> + Send + 'static {
+        let address = self.endpoint.address.clone();
+        let token = self.endpoint.token.clone();
+        let session = self.session.clone();
+        let revision = self.state.identity.revision;
+        move || {
+            let value = if let Some(path) = save_as {
+                serde_json::json!({
+                    "command":"gui_save_as", "token":token, "session":session,
+                    "base_revision":revision, "path":agent::path_wire::to_value(&path)
+                })
+            } else {
+                serde_json::json!({
+                    "command":"gui_save", "token":token, "session":session,
+                    "base_revision":revision
+                })
+            };
+            let response = exchange_with_timeout(&address, &value, Duration::from_secs(10 * 60))?;
+            Ok(response
+                .get("durability_warning")
+                .and_then(|warning| warning.as_str())
+                .map(str::to_owned))
+        }
+    }
+
     pub fn save_as(&mut self, path: &std::path::Path) -> io::Result<Option<String>> {
         let response = self.command(
             "gui_save_as",
@@ -1067,6 +1095,7 @@ fn exchange_with_timeout(
                 Some("stale_revision") => io::ErrorKind::WouldBlock,
                 Some("unauthorized") => io::ErrorKind::PermissionDenied,
                 Some("file_conflict") => io::ErrorKind::AlreadyExists,
+                Some("result_too_large") => io::ErrorKind::InvalidInput,
                 _ => io::ErrorKind::Other,
             },
             message.to_owned(),
