@@ -17,6 +17,25 @@ const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_HISTORY_ENTRIES: usize = 256;
 const GUI_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn gui_lock_is_held(path: &std::path::Path) -> bool {
+    use fs2::FileExt as _;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) => return error.kind() != io::ErrorKind::NotFound,
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(_) => true,
+    }
+}
+
 fn bound_history(history: &mut Vec<String>) {
     while history.len() > MAX_HISTORY_ENTRIES
         || (history.len() > 1 && history.iter().map(String::len).sum::<usize>() > MAX_HISTORY_BYTES)
@@ -108,6 +127,7 @@ pub struct Core {
     recovery_due: Option<Instant>,
     recovered_from: Option<PathBuf>,
     gui_session: Option<String>,
+    gui_lock: Option<PathBuf>,
     gui_last_seen: Option<Instant>,
     stop: bool,
 }
@@ -138,6 +158,7 @@ impl Core {
             recovery_due: None,
             recovered_from: None,
             gui_session: None,
+            gui_lock: None,
             gui_last_seen: None,
             stop: false,
         })
@@ -478,14 +499,28 @@ impl Core {
                     mode: mode.name().into(),
                 }
             }
-            R::GuiAttach { .. } => {
+            R::GuiAttach { liveness, .. } => {
                 if token != owner {
                     return Self::error("unauthorized", "owner token required");
                 }
-                if self
-                    .gui_last_seen
-                    .is_some_and(|seen| seen.elapsed() >= GUI_SESSION_TIMEOUT)
-                {
+                if let Some(path) = &liveness {
+                    let valid_parent = prefs::config_dir()
+                        .map(|base| base.join("host"))
+                        .is_some_and(|directory| path.parent() == Some(directory.as_path()));
+                    if !valid_parent || !gui_lock_is_held(path) {
+                        return Self::error("invalid_liveness", "GUI liveness lock required");
+                    }
+                }
+                let abandoned = if let Some(path) = &self.gui_lock {
+                    !gui_lock_is_held(path)
+                } else {
+                    self.gui_last_seen
+                        .is_some_and(|seen| seen.elapsed() >= GUI_SESSION_TIMEOUT)
+                };
+                if abandoned {
+                    if let Some(path) = self.gui_lock.take() {
+                        let _ = std::fs::remove_file(path);
+                    }
                     self.gui_session = None;
                     self.gui_last_seen = None;
                 }
@@ -497,6 +532,7 @@ impl Core {
                     Err(e) => return Self::error("token_failed", e.to_string()),
                 };
                 self.gui_session = Some(session.clone());
+                self.gui_lock = liveness;
                 self.gui_last_seen = Some(Instant::now());
                 self.gui_state(Some(session))
             }
@@ -505,6 +541,9 @@ impl Core {
                     return Self::error("unauthorized", "GUI session required");
                 }
                 self.gui_session = None;
+                if let Some(path) = self.gui_lock.take() {
+                    let _ = std::fs::remove_file(path);
+                }
                 self.gui_last_seen = None;
                 self.recovery_due = None;
                 self.snapshot();
@@ -728,9 +767,41 @@ fn endpoint_is_live(address: &str) -> bool {
 
 /// Owner-side client used by the GUI. The session is deliberately distinct from
 /// both the owner token and the agent token.
+struct GuiLiveness {
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+impl GuiLiveness {
+    fn new(endpoint_path: &std::path::Path, instance: &str) -> io::Result<Self> {
+        use fs2::FileExt as _;
+        let nonce = agent::new_token()?;
+        let path = endpoint_path.with_file_name(format!("{instance}-{nonce}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        if let Err(error) = file.lock_exclusive() {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+        Ok(Self { file, path })
+    }
+}
+
+impl Drop for GuiLiveness {
+    fn drop(&mut self) {
+        use fs2::FileExt as _;
+        let _ = self.file.unlock();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 pub struct Client {
     endpoint: agent::Endpoint,
     session: String,
+    _liveness: GuiLiveness,
     pub state: HostState,
 }
 
@@ -740,15 +811,16 @@ impl Client {
             .ok_or_else(|| io::Error::other("configuration directory unavailable"))?
             .join("host")
             .join(format!("{instance}.json"));
-        let endpoint: agent::Endpoint = serde_json::from_slice(&std::fs::read(path)?)?;
+        let endpoint: agent::Endpoint = serde_json::from_slice(&std::fs::read(&path)?)?;
         if endpoint.instance_id != instance
             || endpoint.protocol_version != document::PROTOCOL_VERSION
         {
             return Err(io::Error::other("host endpoint mismatch"));
         }
+        let liveness = GuiLiveness::new(&path, instance)?;
         let value = exchange(
             &endpoint.address,
-            &serde_json::json!({"command":"gui_attach","token":endpoint.token}),
+            &serde_json::json!({"command":"gui_attach","token":endpoint.token,"liveness":agent::path_wire::to_value(&liveness.path)}),
         )?;
         let session = value
             .get("session")
@@ -764,6 +836,7 @@ impl Client {
         Ok(Self {
             endpoint,
             session,
+            _liveness: liveness,
             state,
         })
     }
@@ -954,6 +1027,7 @@ fn exchange(address: &str, request: &serde_json::Value) -> io::Result<serde_json
             match code {
                 Some("stale_revision") => io::ErrorKind::WouldBlock,
                 Some("unauthorized") => io::ErrorKind::PermissionDenied,
+                Some("file_conflict") => io::ErrorKind::AlreadyExists,
                 _ => io::ErrorKind::Other,
             },
             message.to_owned(),
@@ -1095,6 +1169,17 @@ fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn gui_liveness_lock_tracks_client_lifetime() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("instance.json");
+        let guard = GuiLiveness::new(&endpoint, "instance").unwrap();
+        let path = guard.path.clone();
+        assert!(gui_lock_is_held(&path));
+        drop(guard);
+        assert!(!gui_lock_is_held(&path));
+    }
+
     #[cfg(unix)]
     #[test]
     fn host_state_round_trips_non_utf8_path() {
@@ -1119,10 +1204,12 @@ mod tests {
 
     #[test]
     fn abandoned_gui_session_can_be_replaced_without_sharing_edit_access() {
+        use fs2::FileExt as _;
         let mut core = Core::new(None, AgentMode::Off).unwrap();
         let first = core.handle(
             agent::Request::GuiAttach {
                 token: "owner".into(),
+                liveness: None,
             },
             "owner",
             "agent",
@@ -1137,17 +1224,35 @@ mod tests {
         assert!(matches!(
             core.handle(
                 agent::Request::GuiAttach {
-                    token: "owner".into()
+                    token: "owner".into(),
+                    liveness: None,
                 },
                 "owner",
                 "agent"
             ),
             agent::Response::Error { .. }
         ));
+        let lock = tempfile::NamedTempFile::new().unwrap();
+        lock.as_file().lock_exclusive().unwrap();
+        core.gui_lock = Some(lock.path().to_path_buf());
         core.gui_last_seen = Some(Instant::now() - GUI_SESSION_TIMEOUT);
+        assert!(matches!(
+            core.handle(
+                agent::Request::GuiAttach {
+                    token: "owner".into(),
+                    liveness: None,
+                },
+                "owner",
+                "agent",
+            ),
+            agent::Response::Error { .. }
+        ));
+        lock.as_file().unlock().unwrap();
+        drop(lock);
         let next = core.handle(
             agent::Request::GuiAttach {
                 token: "owner".into(),
+                liveness: None,
             },
             "owner",
             "agent",

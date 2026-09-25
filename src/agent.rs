@@ -132,6 +132,8 @@ pub enum Request {
     },
     GuiAttach {
         token: String,
+        #[serde(default, deserialize_with = "path_wire::deserialize_option")]
+        liveness: Option<PathBuf>,
     },
     GuiDetach {
         token: String,
