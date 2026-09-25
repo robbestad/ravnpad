@@ -50,8 +50,12 @@ fn config_dir(root: &Path) -> PathBuf {
 }
 
 fn start() -> (Running, PathBuf) {
+    start_named(std::ffi::OsStr::new("note.txt"))
+}
+
+fn start_named(name: &std::ffi::OsStr) -> (Running, PathBuf) {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("note.txt");
+    let path = root.path().join(name);
     std::fs::write(&path, "first").unwrap();
     let endpoints = config_dir(root.path()).join("host");
     std::fs::create_dir_all(&endpoints).unwrap();
@@ -92,6 +96,48 @@ fn start() -> (Running, PathBuf) {
         },
         path,
     )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn gui_ipc_preserves_non_utf8_unix_paths() {
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    let name = std::ffi::OsString::from_vec(b"note-\xff.txt".to_vec());
+    let (host, path) = start_named(&name);
+    let owner = endpoint(&host, "host");
+    let attached = raw(
+        &owner,
+        json!({"command":"gui_attach","token":owner["token"]}),
+    );
+    let session = attached["session"].as_str().unwrap();
+    assert_eq!(
+        attached["state"]["path"]["unix_bytes"],
+        json!(path.as_os_str().as_bytes())
+    );
+    let pulse = raw(
+        &owner,
+        json!({"command":"gui_heartbeat","token":owner["token"],"session":session}),
+    );
+    assert_eq!(pulse["pulse"]["path"], attached["state"]["path"]);
+    assert_eq!(
+        raw(
+            &owner,
+            json!({"command":"gui_save","token":owner["token"],"session":session,"base_revision":0})
+        )["status"],
+        "saved"
+    );
+    let next = host
+        .root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"next-\xff.txt".to_vec()));
+    assert_eq!(
+        raw(
+            &owner,
+            json!({"command":"gui_save_as","token":owner["token"],"session":session,"base_revision":0,"path":{"unix_bytes":next.as_os_str().as_bytes()}})
+        )["status"],
+        "saved"
+    );
+    assert_eq!(std::fs::read_to_string(next).unwrap(), "first");
 }
 
 fn cli(host: &Running, args: &[&str], input: Option<&str>) -> (bool, Value) {

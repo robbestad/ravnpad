@@ -54,6 +54,10 @@ impl AgentMode {
 pub struct HostState {
     pub identity: document::Identity,
     pub text: String,
+    #[serde(
+        serialize_with = "agent::path_wire::serialize_option",
+        deserialize_with = "agent::path_wire::deserialize_option"
+    )]
     pub path: Option<PathBuf>,
     pub dirty: bool,
     pub undo_depth: usize,
@@ -65,6 +69,10 @@ pub struct HostState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostPulse {
     pub identity: document::Identity,
+    #[serde(
+        serialize_with = "agent::path_wire::serialize_option",
+        deserialize_with = "agent::path_wire::deserialize_option"
+    )]
     pub path: Option<PathBuf>,
     pub dirty: bool,
     pub undo_depth: usize,
@@ -887,7 +895,7 @@ impl Client {
     pub fn save_as(&mut self, path: &std::path::Path) -> io::Result<Option<String>> {
         let response = self.command(
             "gui_save_as",
-            serde_json::json!({"base_revision":self.state.identity.revision,"path":path}),
+            serde_json::json!({"base_revision":self.state.identity.revision,"path":agent::path_wire::to_value(path)}),
         )?;
         self.refresh()?;
         Ok(response
@@ -897,7 +905,10 @@ impl Client {
     }
 
     pub fn recover(&mut self, path: &std::path::Path) -> io::Result<&HostState> {
-        self.command("gui_recover", serde_json::json!({"path":path}))?;
+        self.command(
+            "gui_recover",
+            serde_json::json!({"path":agent::path_wire::to_value(path)}),
+        )?;
         Ok(&self.state)
     }
 
@@ -1083,6 +1094,28 @@ fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn host_state_round_trips_non_utf8_path() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"note-\xff.txt".to_vec()));
+        let state = HostState {
+            identity: document::Document::new("text", EDIT_LIMIT)
+                .identity()
+                .clone(),
+            text: "text".into(),
+            path: Some(path.clone()),
+            dirty: false,
+            undo_depth: 0,
+            redo_depth: 0,
+            agent_mode: "off".into(),
+            read_only: false,
+        };
+        let encoded = serde_json::to_vec(&state).unwrap();
+        let decoded: HostState = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.path, Some(path));
+    }
 
     #[test]
     fn abandoned_gui_session_can_be_replaced_without_sharing_edit_access() {

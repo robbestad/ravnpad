@@ -20,6 +20,88 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
 const MAX_CLIENT_WORKERS: usize = 16;
 
+/// UTF-8 paths keep their existing string shape. Native paths that cannot be
+/// represented as UTF-8 use platform units so GUI and host exchange them intact.
+pub(crate) mod path_wire {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+    use std::path::{Path, PathBuf};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum WirePath {
+        Utf8(String),
+        Unix { unix_bytes: Vec<u8> },
+        Windows { windows_wide: Vec<u16> },
+    }
+
+    impl WirePath {
+        fn from_path(path: &Path) -> Self {
+            if let Some(text) = path.to_str() {
+                return Self::Utf8(text.into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt as _;
+                Self::Unix {
+                    unix_bytes: path.as_os_str().as_bytes().to_vec(),
+                }
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStrExt as _;
+                Self::Windows {
+                    windows_wide: path.as_os_str().encode_wide().collect(),
+                }
+            }
+        }
+
+        fn into_path(self) -> Result<PathBuf, &'static str> {
+            match self {
+                Self::Utf8(text) => Ok(PathBuf::from(text)),
+                #[cfg(unix)]
+                Self::Unix { unix_bytes } => {
+                    use std::os::unix::ffi::OsStringExt as _;
+                    Ok(std::ffi::OsString::from_vec(unix_bytes).into())
+                }
+                #[cfg(windows)]
+                Self::Windows { windows_wide } => {
+                    use std::os::windows::ffi::OsStringExt as _;
+                    Ok(std::ffi::OsString::from_wide(&windows_wide).into())
+                }
+                #[allow(unreachable_patterns)]
+                _ => Err("path encoding is for a different platform"),
+            }
+        }
+    }
+
+    pub fn to_value(path: &Path) -> serde_json::Value {
+        serde_json::to_value(WirePath::from_path(path)).expect("native path encoding")
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+        WirePath::deserialize(deserializer)?
+            .into_path()
+            .map_err(D::Error::custom)
+    }
+
+    pub fn serialize_option<S: Serializer>(
+        path: &Option<PathBuf>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        path.as_ref()
+            .map(|path| WirePath::from_path(path))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize_option<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<PathBuf>, D::Error> {
+        Option::<WirePath>::deserialize(deserializer)?
+            .map(|path| path.into_path().map_err(D::Error::custom))
+            .transpose()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Request {
@@ -88,11 +170,13 @@ pub enum Request {
         token: String,
         session: String,
         base_revision: u64,
+        #[serde(deserialize_with = "path_wire::deserialize")]
         path: PathBuf,
     },
     GuiRecover {
         token: String,
         session: String,
+        #[serde(deserialize_with = "path_wire::deserialize")]
         path: PathBuf,
     },
 }
