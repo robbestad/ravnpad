@@ -708,22 +708,33 @@ pub fn run(path: Option<PathBuf>, mode: AgentMode) -> io::Result<()> {
             }
         };
         if let Some(request) = pending {
-            let response = core.handle(request.request.clone(), server.token(), &agent_token);
-            request.respond(response);
+            let previous_mode = core.mode;
+            let mut response = core.handle(request.request.clone(), server.token(), &agent_token);
+            if matches!(response, agent::Response::Mode { .. })
+                && core.mode != AgentMode::Off
+                && agent_path.is_none()
+            {
+                let publication = agent::new_token().and_then(|token| {
+                    agent::publish_endpoint(&agent_dir, &instance, server.address(), &token)
+                        .map(|path| (token, path))
+                });
+                match publication {
+                    Ok((token, path)) => {
+                        agent_token = token;
+                        agent_path = Some(path);
+                    }
+                    Err(error) => {
+                        core.mode = previous_mode;
+                        response = Core::error("agent_endpoint_failed", error.to_string());
+                    }
+                }
+            }
             if core.mode == AgentMode::Off && agent_path.is_some() {
                 if let Some(path) = agent_path.take() {
                     let _ = std::fs::remove_file(path);
                 }
             }
-            if core.mode != AgentMode::Off && agent_path.is_none() {
-                agent_token = agent::new_token()?;
-                agent_path = Some(agent::publish_endpoint(
-                    &agent_dir,
-                    &instance,
-                    server.address(),
-                    &agent_token,
-                )?);
-            }
+            request.respond(response);
         }
         core.flush_recovery_if_due();
     }

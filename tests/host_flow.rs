@@ -54,6 +54,10 @@ fn start() -> (Running, PathBuf) {
 }
 
 fn start_named(name: &std::ffi::OsStr) -> (Running, PathBuf) {
+    start_named_with_mode(name, "edit")
+}
+
+fn start_named_with_mode(name: &std::ffi::OsStr, mode: &str) -> (Running, PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join(name);
     std::fs::write(&path, "first").unwrap();
@@ -75,7 +79,7 @@ fn start_named(name: &std::ffi::OsStr) -> (Running, PathBuf) {
     let mut child = command
         .args(["serve", "--path"])
         .arg(&path)
-        .args(["--agent", "edit"])
+        .args(["--agent", mode])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -96,6 +100,26 @@ fn start_named(name: &std::ffi::OsStr) -> (Running, PathBuf) {
         },
         path,
     )
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_agent_endpoint_publication_keeps_host_and_mode() {
+    let (host, _) = start_named_with_mode(std::ffi::OsStr::new("note.txt"), "off");
+    let owner = endpoint(&host, "host");
+    std::fs::write(config_dir(host.root.path()).join("agent"), "blocked").unwrap();
+
+    let result = raw(
+        &owner,
+        json!({"command":"host_set_mode","token":owner["token"],"mode":"explore"}),
+    );
+    assert_eq!(result["error"]["code"], "agent_endpoint_failed");
+    let attached = raw(
+        &owner,
+        json!({"command":"gui_attach","token":owner["token"]}),
+    );
+    assert_eq!(attached["state"]["agent_mode"], "off");
+    assert!(cli(&host, &["host", "stop", "--instance", &host.instance], None).0);
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
