@@ -60,6 +60,18 @@ pub struct LargeView {
 }
 
 impl LargeView {
+    pub(crate) fn reopen(path: &Path) -> std::io::Result<Self> {
+        let size = fs::metadata(path)?.len();
+        File::open(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            size,
+            offset: 0,
+            window: String::new(),
+            prepared_for: None,
+        })
+    }
+
     fn open(path: &Path, size: u64) -> Result<Self, FileError> {
         File::open(path).map_err(FileError::Open)?;
         Ok(Self {

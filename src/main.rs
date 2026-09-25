@@ -787,6 +787,9 @@ impl RavnPad {
 
     fn apply_host_state(&mut self, state: &host::HostState) {
         self.host_conflict_pending = false;
+        if !state.read_only {
+            self.large = None;
+        }
         self.text.clone_from(&state.text);
         self.host_synced_text.clone_from(&state.text);
         if !state.dirty {
@@ -871,10 +874,26 @@ impl RavnPad {
     fn connect_host(&mut self, instance: &str) -> io::Result<()> {
         let client = host::Client::connect(instance)?;
         let state = client.state.clone();
+        let view = self.host_read_only_view(&state)?;
         self.host_client = Some(client);
         self.apply_host_state(&state);
+        self.large = view;
         self.document_generation += 1;
         Ok(())
+    }
+
+    fn host_read_only_view(&self, state: &host::HostState) -> io::Result<Option<large::LargeView>> {
+        if !state.read_only {
+            return Ok(None);
+        }
+        let path = state
+            .path
+            .as_deref()
+            .ok_or_else(|| io::Error::other("read-only host has no file path"))?;
+        let mut view = large::LargeView::reopen(path)?;
+        let (_, offset) = self.prefs.position(path);
+        view.set_offset(offset);
+        Ok(Some(view))
     }
 
     fn spawn_host(&mut self, path: Option<&Path>) -> io::Result<()> {
@@ -2983,6 +3002,28 @@ fn avoid_broken_fullscreen(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnect_restores_large_read_only_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(&dir.path().join("recovery"));
+        let path = dir.path().join("large.txt");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(large::EDIT_LIMIT + 1).unwrap();
+        let state = host::HostState {
+            identity: document::Document::new("", 1).identity().clone(),
+            text: String::new(),
+            path: Some(path.clone()),
+            dirty: false,
+            undo_depth: 0,
+            redo_depth: 0,
+            agent_mode: "off".into(),
+            read_only: true,
+        };
+        let view = app.host_read_only_view(&state).unwrap().unwrap();
+        assert_eq!(view.path, path);
+        assert_eq!(view.size, large::EDIT_LIMIT + 1);
+    }
 
     #[test]
     fn lost_host_transport_keeps_local_text_in_recovery() {
