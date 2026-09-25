@@ -59,6 +59,10 @@ pub enum Request {
         token: String,
         session: String,
     },
+    GuiHeartbeat {
+        token: String,
+        session: String,
+    },
     GuiEdit {
         token: String,
         session: String,
@@ -105,6 +109,7 @@ impl Request {
             | Self::GuiAttach { token, .. }
             | Self::GuiDetach { token, .. }
             | Self::GuiState { token, .. }
+            | Self::GuiHeartbeat { token, .. }
             | Self::GuiEdit { token, .. }
             | Self::GuiUndo { token, .. }
             | Self::GuiRedo { token, .. }
@@ -141,6 +146,9 @@ pub enum Response {
     Gui {
         state: crate::host::HostState,
         session: Option<String>,
+    },
+    Heartbeat {
+        pulse: crate::host::HostPulse,
     },
     Error {
         error: ApiError,

@@ -62,6 +62,31 @@ pub struct HostState {
     pub read_only: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostPulse {
+    pub identity: document::Identity,
+    pub path: Option<PathBuf>,
+    pub dirty: bool,
+    pub undo_depth: usize,
+    pub redo_depth: usize,
+    pub agent_mode: String,
+    pub read_only: bool,
+}
+
+impl From<&HostState> for HostPulse {
+    fn from(state: &HostState) -> Self {
+        Self {
+            identity: state.identity.clone(),
+            path: state.path.clone(),
+            dirty: state.dirty,
+            undo_depth: state.undo_depth,
+            redo_depth: state.redo_depth,
+            agent_mode: state.agent_mode.clone(),
+            read_only: state.read_only,
+        }
+    }
+}
+
 pub struct Core {
     pub document: document::Document,
     text: String,
@@ -114,6 +139,18 @@ impl Core {
         HostState {
             identity: self.document.identity().clone(),
             text: self.text.clone(),
+            path: self.path.clone(),
+            dirty: self.dirty(),
+            undo_depth: self.undo.len(),
+            redo_depth: self.redo.len(),
+            agent_mode: self.mode.name().into(),
+            read_only: self.read_only,
+        }
+    }
+
+    fn pulse(&self) -> HostPulse {
+        HostPulse {
+            identity: self.document.identity().clone(),
             path: self.path.clone(),
             dirty: self.dirty(),
             undo_depth: self.undo.len(),
@@ -471,6 +508,14 @@ impl Core {
                 }
                 self.gui_state(None)
             }
+            R::GuiHeartbeat { session, .. } => {
+                if !self.gui_authorized(&token, &session, owner) {
+                    return Self::error("unauthorized", "GUI session required");
+                }
+                agent::Response::Heartbeat {
+                    pulse: self.pulse(),
+                }
+            }
             R::GuiEdit {
                 session,
                 base_revision,
@@ -778,8 +823,23 @@ impl Client {
         Ok(response)
     }
 
+    pub fn refresh_if_changed(&mut self) -> io::Result<Option<&HostState>> {
+        let response = self.command("gui_heartbeat", serde_json::json!({}))?;
+        let pulse: HostPulse = serde_json::from_value(
+            response
+                .get("pulse")
+                .cloned()
+                .ok_or_else(|| io::Error::other("host heartbeat missing"))?,
+        )?;
+        if pulse != HostPulse::from(&self.state) {
+            self.command("gui_state", serde_json::json!({}))?;
+            return Ok(Some(&self.state));
+        }
+        Ok(None)
+    }
+
     pub fn refresh(&mut self) -> io::Result<&HostState> {
-        self.command("gui_state", serde_json::json!({}))?;
+        self.refresh_if_changed()?;
         Ok(&self.state)
     }
 

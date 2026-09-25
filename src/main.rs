@@ -408,7 +408,7 @@ impl RavnPad {
                 if let Err(error) = app.spawn_host(None) {
                     app.error = Some(AppError::Settings(error));
                 }
-                if app.agent_requested != AgentMode::Off {
+                if app.agent_requested != AgentMode::Off && app.host_client.is_some() {
                     app.start_agent(app.agent_requested);
                 }
             }
@@ -708,12 +708,16 @@ impl RavnPad {
             let due = std::time::Instant::now() >= self.host_poll_due;
             if changed || due {
                 let result = if changed {
-                    self.host_client.as_mut().unwrap().edit(&self.text)
+                    self.host_client
+                        .as_mut()
+                        .unwrap()
+                        .edit(&self.text)
+                        .map(Some)
                 } else {
-                    self.host_client.as_mut().unwrap().refresh()
+                    self.host_client.as_mut().unwrap().refresh_if_changed()
                 };
                 match result {
-                    Ok(state) => {
+                    Ok(Some(state)) => {
                         let state = state.clone();
                         if !self.host_conflict_pending {
                             if self.text != state.text
@@ -729,6 +733,7 @@ impl RavnPad {
                             self.dirty = state.dirty;
                         }
                     }
+                    Ok(None) => {}
                     Err(error) => {
                         if changed
                             && matches!(
@@ -787,14 +792,6 @@ impl RavnPad {
             self.cached_query.clone_from(&self.find_query);
         }
         self.cache_valid = true;
-    }
-
-    fn host_mode(&self) -> host::AgentMode {
-        match self.agent_mode {
-            AgentMode::Off => host::AgentMode::Off,
-            AgentMode::Explore => host::AgentMode::Explore,
-            AgentMode::Edit => host::AgentMode::Edit,
-        }
     }
 
     fn apply_host_state(&mut self, state: &host::HostState) {
@@ -875,7 +872,13 @@ impl RavnPad {
     }
 
     fn spawn_host(&mut self, path: Option<&Path>) -> io::Result<()> {
-        let client = host::Client::spawn(path, self.host_mode())?;
+        // The previous document keeps running in its own host. Clear its GUI
+        // attachment before any failure can leave this buffer tied to it.
+        self.host_client.take();
+        self.host_synced_text.clear();
+        self.host_conflict_pending = false;
+        self.agent_mode = AgentMode::Off;
+        let client = host::Client::spawn(path, host::AgentMode::Off)?;
         let state = client.state.clone();
         self.host_client = Some(client);
         self.apply_host_state(&state);
@@ -1837,7 +1840,7 @@ impl RavnPad {
                 }
             }
         }
-        if self.agent_requested != AgentMode::Off {
+        if self.agent_requested != AgentMode::Off && self.host_client.is_some() {
             self.start_agent(self.agent_requested);
         }
         self.spell_dirty = true;

@@ -158,6 +158,12 @@ fn gui_round_trip_handles_json_expansion_beyond_old_transport_limit() {
         json!({"command":"gui_edit","token":owner["token"],"session":session,"base_revision":0,"text":text}),
     );
     assert_eq!(edited["state"]["text"].as_str().unwrap().len(), text.len());
+    let pulse = raw(
+        &owner,
+        json!({"command":"gui_heartbeat","token":owner["token"],"session":session}),
+    );
+    assert_eq!(pulse["status"], "heartbeat");
+    assert!(serde_json::to_vec(&pulse).unwrap().len() < 1024);
     let refreshed = raw(
         &owner,
         json!({"command":"gui_state","token":owner["token"],"session":session}),
@@ -182,6 +188,13 @@ fn gui_save_rejects_an_unseen_revision() {
         )["status"],
         "gui"
     );
+    let pulse = raw(
+        &owner,
+        json!({"command":"gui_heartbeat","token":owner["token"],"session":session}),
+    );
+    assert_eq!(pulse["pulse"]["identity"]["revision"], 1);
+    assert_eq!(pulse["pulse"]["dirty"], true);
+    assert!(pulse["pulse"].get("text").is_none());
     let other = host.root.path().join("other.txt");
     for command in ["gui_save", "gui_save_as"] {
         let mut request =
