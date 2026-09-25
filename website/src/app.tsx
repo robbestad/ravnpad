@@ -3,7 +3,7 @@ import svenjsMark from "./svenjs-mark.svg";
 
 const GITHUB = "https://github.com/robbestad/ravnpad";
 const RELEASES = `${GITHUB}/releases`;
-const FALLBACK_TAG = "v1.3.16";
+const FALLBACK_TAG = "v1.3.17";
 const FALLBACK_ASSET = `${RELEASES}/download/${FALLBACK_TAG}`;
 
 const FALLBACK = {
