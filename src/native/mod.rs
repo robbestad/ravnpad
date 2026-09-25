@@ -833,7 +833,10 @@ impl Native {
                 c(&status).as_ptr(),
                 self.app.is_dirty() as i32,
                 busy as i32,
-                (self.binary_readonly || self.app.large.is_some() || self.viewer_busy) as i32,
+                (self.binary_readonly
+                    || self.app.large.is_some()
+                    || self.viewer_busy
+                    || self.app.host_client.is_none()) as i32,
                 self.large_document as i32,
             );
             rp_preferences(

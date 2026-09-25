@@ -850,6 +850,12 @@ impl RavnPad {
             self.set_agent_mode(mode);
             return;
         }
+        if !cfg!(test) {
+            self.error = Some(AppError::Settings(io::Error::other(
+                "document host unavailable",
+            )));
+            return;
+        }
         if self.agent.is_some() {
             self.set_agent_mode(mode);
             return;
@@ -1637,6 +1643,12 @@ impl RavnPad {
     }
 
     fn start_save(&mut self) -> bool {
+        if !cfg!(test) && self.host_client.is_none() {
+            self.error = Some(AppError::Save(io::Error::other(
+                "document host unavailable",
+            )));
+            return false;
+        }
         let Some(path) = self.pick_save_path() else {
             return false;
         };
@@ -1756,6 +1768,12 @@ impl RavnPad {
     }
 
     fn write_current(&mut self) -> bool {
+        if !cfg!(test) && self.host_client.is_none() {
+            self.error = Some(AppError::Save(io::Error::other(
+                "document host unavailable",
+            )));
+            return false;
+        }
         if self.large.is_some() {
             self.error = Some(AppError::TooLargeToEdit);
             return false;
@@ -2402,7 +2420,7 @@ impl eframe::App for RavnPad {
                         })
                         .desired_rows(min_rows)
                         .lock_focus(!dialog_busy)
-                        .interactive(!dialog_busy)
+                        .interactive(!dialog_busy && (cfg!(test) || self.host_client.is_some()))
                         .show(ui);
                     if output.response.changed() {
                         self.cache_valid = false;
