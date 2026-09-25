@@ -2,7 +2,10 @@ use std::{
     fs::{self, OpenOptions},
     io,
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::Duration,
 };
@@ -35,10 +38,18 @@ pub struct Recovery {
 
 impl Recovery {
     pub fn start() -> Self {
-        Self::start_in(crate::prefs::config_dir().map(|p| p.join("recovery")))
+        Self::start_with_wake(Arc::new(|| {}))
+    }
+
+    pub fn start_with_wake(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self::start_in_with_wake(crate::prefs::config_dir().map(|p| p.join("recovery")), wake)
     }
 
     pub(crate) fn start_in(dir: Option<PathBuf>) -> Self {
+        Self::start_in_with_wake(dir, Arc::new(|| {}))
+    }
+
+    fn start_in_with_wake(dir: Option<PathBuf>, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -47,6 +58,7 @@ impl Recovery {
             };
             if let Err(error) = fs::create_dir_all(&dir) {
                 let _ = events.send(Event::Failed(error));
+                wake();
                 return;
             }
             let unique = std::time::SystemTime::now()
@@ -69,6 +81,7 @@ impl Recovery {
                 Ok(lock) => lock,
                 Err(error) => {
                     let _ = events.send(Event::Failed(error));
+                    wake();
                     return;
                 }
             };
@@ -107,6 +120,7 @@ impl Recovery {
                 Err(e) => Event::Failed(e),
             };
             let _ = events.send(event);
+            wake();
             while let Ok(command) = commands.recv() {
                 let result = match command {
                     Command::Snapshot(Some(text)) => {
@@ -128,9 +142,11 @@ impl Recovery {
                 match result {
                     Ok(Some(event)) => {
                         let _ = events.send(event);
+                        wake();
                     }
                     Err(e) => {
                         let _ = events.send(Event::Failed(e));
+                        wake();
                     }
                     _ => {}
                 }
@@ -207,6 +223,34 @@ impl Drop for Recovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_wakes_gui_recovery_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let worker = Recovery::start_in_with_wake(
+            Some(dir.path().to_owned()),
+            Arc::new(move || {
+                let _ = wake_tx.send(());
+            }),
+        );
+        assert!(matches!(
+            worker.rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Available(_)
+        ));
+        wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        worker
+            .tx
+            .send(Command::Read(dir.path().join("missing.txt")))
+            .unwrap();
+        assert!(matches!(
+            worker.rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::ReadFailed(_)
+        ));
+        wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
     fn available(worker: &Recovery) -> Vec<PathBuf> {
         match worker
             .rx

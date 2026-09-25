@@ -328,7 +328,10 @@ impl RavnPad {
             file_rx,
             file_busy: false,
             after_save: None,
-            recovery: recovery::Recovery::start(),
+            recovery: recovery::Recovery::start_with_wake(std::sync::Arc::new({
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            })),
             recovery_candidates: Vec::new(),
             recovery_due: None,
             recovered_from: None,

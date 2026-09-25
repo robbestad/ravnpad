@@ -134,6 +134,7 @@ pub struct Core {
 
 impl Core {
     pub fn new(path: Option<PathBuf>, mode: AgentMode) -> io::Result<Self> {
+        let path = path.map(std::path::absolute).transpose()?;
         let (text, read_only) = match &path {
             Some(path) if std::fs::metadata(path)?.len() > EDIT_LIMIT as u64 => {
                 (String::new(), true)
@@ -241,6 +242,7 @@ impl Core {
         if self.read_only {
             return Err(io::Error::other("this document is read-only"));
         }
+        let path = std::path::absolute(path)?;
         let expected = if self.path.as_ref() == Some(&path) {
             Some(self.saved_text.as_bytes().to_vec())
         } else {
@@ -1170,6 +1172,32 @@ fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_document_path_is_published_as_absolute() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let relative = PathBuf::from(directory.path().file_name().unwrap()).join("document.txt");
+        std::fs::write(&relative, "content").unwrap();
+        let core = Core::new(Some(relative.clone()), AgentMode::Off).unwrap();
+        assert_eq!(
+            core.state().path,
+            Some(std::path::absolute(relative).unwrap())
+        );
+        assert!(core.state().path.unwrap().is_absolute());
+    }
+
+    #[test]
+    fn relative_save_as_path_is_published_as_absolute() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let relative = PathBuf::from(directory.path().file_name().unwrap()).join("saved.txt");
+        let mut core = Core::new(None, AgentMode::Off).unwrap();
+        core.changed("content".into());
+        core.save_as(relative.clone()).unwrap();
+        assert_eq!(
+            core.state().path,
+            Some(std::path::absolute(relative).unwrap())
+        );
+    }
 
     #[test]
     fn discard_stop_waits_for_recovery_snapshot() {
