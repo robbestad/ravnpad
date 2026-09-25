@@ -109,18 +109,20 @@ fn gui_executable_can_start_embedded_host_without_helper_binary() {
     std::fs::write(&path, "embedded host").unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ravnpad"));
     configure(&mut command, root.path());
-    let output = command
+    let mut launcher = command
         .args(["--ravnpad-host", "start", "--path"])
         .arg(&path)
         .args(["--agent", "off"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let ids: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(launcher.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(launcher.wait().unwrap().success());
+    let ids: Value = serde_json::from_str(&line).unwrap();
     let instance = ids["instance_id"].as_str().unwrap();
     let mut cli = Command::new(env!("CARGO_BIN_EXE_ravnpad-cli"));
     configure(&mut cli, root.path());
