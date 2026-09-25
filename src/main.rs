@@ -233,6 +233,7 @@ struct RavnPad {
     document: document::Document,
     host_client: Option<host::Client>,
     host_synced_text: String,
+    host_conflict_pending: bool,
     host_poll_due: std::time::Instant,
     agent: Option<agent::Server>,
     agent_mode: AgentMode,
@@ -336,6 +337,7 @@ impl RavnPad {
             document,
             host_client: None,
             host_synced_text: String::new(),
+            host_conflict_pending: false,
             host_poll_due: std::time::Instant::now(),
             agent: None,
             agent_mode: AgentMode::Off,
@@ -701,7 +703,7 @@ impl RavnPad {
     }
 
     fn refresh_document(&mut self) {
-        if self.host_client.is_some() {
+        if self.host_client.is_some() && !self.host_conflict_pending {
             let changed = self.text != self.host_synced_text;
             let due = std::time::Instant::now() >= self.host_poll_due;
             if changed || due {
@@ -724,12 +726,24 @@ impl RavnPad {
                         self.dirty = state.dirty;
                     }
                     Err(error) => {
-                        self.error = Some(AppError::Settings(error));
-                        if let Some(client) = self.host_client.as_mut()
-                            && let Ok(state) = client.refresh()
+                        if changed
+                            && matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
+                            )
                         {
-                            let state = state.clone();
-                            self.apply_host_state(&state);
+                            self.host_conflict_pending = true;
+                            let _ = self
+                                .recovery
+                                .tx
+                                .send(recovery::Command::Snapshot(Some(self.text.clone())));
+                            if error.kind() == io::ErrorKind::WouldBlock {
+                                self.resolve_host_conflict();
+                            } else {
+                                self.error = Some(AppError::Settings(error));
+                            }
+                        } else {
+                            self.error = Some(AppError::Settings(error));
                         }
                     }
                 }
@@ -753,6 +767,11 @@ impl RavnPad {
                 }
             } else if self.host_client.is_none() {
                 self.clear_recovery();
+            } else if self.host_conflict_pending {
+                let _ = self
+                    .recovery
+                    .tx
+                    .send(recovery::Command::Snapshot(Some(self.text.clone())));
             }
             self.counts = (
                 self.text.chars().count(),
@@ -775,6 +794,7 @@ impl RavnPad {
     }
 
     fn apply_host_state(&mut self, state: &host::HostState) {
+        self.host_conflict_pending = false;
         self.text.clone_from(&state.text);
         self.host_synced_text.clone_from(&state.text);
         if !state.dirty {
@@ -790,6 +810,47 @@ impl RavnPad {
         };
         self.cache_valid = false;
         self.spell_dirty = true;
+    }
+
+    /// A stale edit must never replace text that has only been typed locally.
+    /// The user explicitly chooses which buffer wins before sending another edit.
+    fn resolve_host_conflict(&mut self) -> bool {
+        let remote = match self.host_client.as_mut().unwrap().refresh() {
+            Ok(state) => state.clone(),
+            Err(error) => {
+                self.error = Some(AppError::Settings(error));
+                return false;
+            }
+        };
+        match native_dialog::unsaved(
+            "Document changed",
+            "The host changed while you were editing. Choose which text to keep.",
+            "Keep my edits",
+            "Use host text",
+            "Decide later",
+        ) {
+            native_dialog::Confirm::Save => {
+                let result = self.host_client.as_mut().unwrap().edit(&self.text);
+                match result {
+                    Ok(state) => {
+                        let state = state.clone();
+                        self.apply_host_state(&state);
+                        let _ = self.recovery.tx.send(recovery::Command::Snapshot(None));
+                        true
+                    }
+                    Err(error) => {
+                        self.error = Some(AppError::Settings(error));
+                        false
+                    }
+                }
+            }
+            native_dialog::Confirm::Discard => {
+                self.apply_host_state(&remote);
+                let _ = self.recovery.tx.send(recovery::Command::Snapshot(None));
+                true
+            }
+            native_dialog::Confirm::Cancel => false,
+        }
     }
 
     fn connect_host(&mut self, instance: &str) -> io::Result<()> {
@@ -823,6 +884,9 @@ impl RavnPad {
     }
 
     fn host_history(&mut self, undo: bool) {
+        if self.host_conflict_pending && !self.resolve_host_conflict() {
+            return;
+        }
         let Some(client) = self.host_client.as_mut() else {
             return;
         };
@@ -1243,7 +1307,7 @@ impl RavnPad {
     }
 
     fn is_dirty(&self) -> bool {
-        self.dirty
+        self.dirty || self.host_conflict_pending
     }
 
     fn display_name(&self) -> String {
@@ -1270,7 +1334,9 @@ impl RavnPad {
                 | Action::OpenBytes(_)
                 | Action::InstallUpdate { .. }
         ) && self.is_dirty()
-            && !(matches!(action, Action::Quit) && self.host_client.is_some())
+            && !(matches!(action, Action::Quit)
+                && self.host_client.is_some()
+                && !self.host_conflict_pending)
         {
             self.confirm = Some(action);
             return;
@@ -1652,8 +1718,7 @@ impl RavnPad {
         let Some(path) = self.pick_save_path() else {
             return false;
         };
-        self.begin_save(path);
-        true
+        self.begin_save(path)
     }
 
     fn pick_open_path(&self) -> Option<PathBuf> {
@@ -1781,11 +1846,13 @@ impl RavnPad {
         let Some(path) = &self.path else {
             return false;
         };
-        self.begin_save(path.clone());
-        true
+        self.begin_save(path.clone())
     }
 
-    fn begin_save(&mut self, path: PathBuf) {
+    fn begin_save(&mut self, path: PathBuf) -> bool {
+        if self.host_conflict_pending && !self.resolve_host_conflict() {
+            return false;
+        }
         if let Some(client) = self.host_client.as_mut() {
             self.file_busy = true;
             let text = self.text.clone();
@@ -1803,7 +1870,7 @@ impl RavnPad {
                 })
             })();
             let _ = self.file_tx.send(FileEvent::Save(path, text, result));
-            return;
+            return true;
         }
         self.file_busy = true;
         let text = self.text.clone();
@@ -1823,6 +1890,7 @@ impl RavnPad {
             let _ = tx.send(FileEvent::Save(path, text, result));
             ctx.request_repaint();
         });
+        true
     }
 
     fn clear_recovery(&mut self) {
@@ -2584,7 +2652,7 @@ impl eframe::App for RavnPad {
 
         if ctx.input(|input| input.viewport().close_requested())
             && self.is_dirty()
-            && self.host_client.is_none()
+            && (self.host_client.is_none() || self.host_conflict_pending)
             && !self.restarting
         {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -2594,7 +2662,9 @@ impl eframe::App for RavnPad {
         }
 
         if let Some(action) = action {
-            if matches!(action, Action::Quit) && (!self.is_dirty() || self.host_client.is_some()) {
+            if matches!(action, Action::Quit)
+                && (!self.is_dirty() || (self.host_client.is_some() && !self.host_conflict_pending))
+            {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             } else if matches!(action, Action::Quit) {
                 self.request(Action::Quit);
@@ -2934,6 +3004,7 @@ mod tests {
             document: document::Document::new("", large::EDIT_LIMIT as usize),
             host_client: None,
             host_synced_text: String::new(),
+            host_conflict_pending: false,
             host_poll_due: std::time::Instant::now(),
             agent: None,
             agent_mode: AgentMode::Off,

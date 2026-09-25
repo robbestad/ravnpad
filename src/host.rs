@@ -15,6 +15,7 @@ const EDIT_LIMIT: usize = 16 * 1024 * 1024;
 const EDIT_LIMIT: usize = 2 * 1024 * 1024;
 const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_HISTORY_ENTRIES: usize = 256;
+const GUI_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn bound_history(history: &mut Vec<String>) {
     while history.len() > MAX_HISTORY_ENTRIES
@@ -74,6 +75,7 @@ pub struct Core {
     recovery_due: Option<Instant>,
     recovered_from: Option<PathBuf>,
     gui_session: Option<String>,
+    gui_last_seen: Option<Instant>,
     stop: bool,
 }
 
@@ -103,6 +105,7 @@ impl Core {
             recovery_due: None,
             recovered_from: None,
             gui_session: None,
+            gui_last_seen: None,
             stop: false,
         })
     }
@@ -216,8 +219,12 @@ impl Core {
         }
     }
 
-    fn gui_authorized(&self, token: &str, session: &str, owner: &str) -> bool {
-        token == owner && self.gui_session.as_deref() == Some(session)
+    fn gui_authorized(&mut self, token: &str, session: &str, owner: &str) -> bool {
+        if token != owner || self.gui_session.as_deref() != Some(session) {
+            return false;
+        }
+        self.gui_last_seen = Some(Instant::now());
+        true
     }
 
     fn gui_state(&self, session: Option<String>) -> agent::Response {
@@ -430,6 +437,13 @@ impl Core {
                 if token != owner {
                     return Self::error("unauthorized", "owner token required");
                 }
+                if self
+                    .gui_last_seen
+                    .is_some_and(|seen| seen.elapsed() >= GUI_SESSION_TIMEOUT)
+                {
+                    self.gui_session = None;
+                    self.gui_last_seen = None;
+                }
                 if self.gui_session.is_some() {
                     return Self::error("gui_busy", "an editing GUI is already attached");
                 }
@@ -438,6 +452,7 @@ impl Core {
                     Err(e) => return Self::error("token_failed", e.to_string()),
                 };
                 self.gui_session = Some(session.clone());
+                self.gui_last_seen = Some(Instant::now());
                 self.gui_state(Some(session))
             }
             R::GuiDetach { session, .. } => {
@@ -445,6 +460,7 @@ impl Core {
                     return Self::error("unauthorized", "GUI session required");
                 }
                 self.gui_session = None;
+                self.gui_last_seen = None;
                 self.recovery_due = None;
                 self.snapshot();
                 self.gui_state(None)
@@ -807,8 +823,8 @@ impl Drop for Client {
 
 fn exchange(address: &str, request: &serde_json::Value) -> io::Result<serde_json::Value> {
     let bytes = serde_json::to_vec(request)?;
-    if bytes.len() > 32 * 1024 * 1024 {
-        return Err(io::Error::other("request exceeds 32 MiB"));
+    if bytes.len() > agent::MAX_MESSAGE {
+        return Err(io::Error::other("request exceeds transport limit"));
     }
     let response = exchange_bytes(address, &bytes)?;
     let value: serde_json::Value = serde_json::from_slice(&response)?;
@@ -817,7 +833,15 @@ fn exchange(address: &str, request: &serde_json::Value) -> io::Result<serde_json
             .pointer("/error/message")
             .and_then(|v| v.as_str())
             .unwrap_or("host command failed");
-        return Err(io::Error::other(message.to_owned()));
+        let code = value.pointer("/error/code").and_then(|v| v.as_str());
+        return Err(io::Error::new(
+            match code {
+                Some("stale_revision") => io::ErrorKind::WouldBlock,
+                Some("unauthorized") => io::ErrorKind::PermissionDenied,
+                _ => io::ErrorKind::Other,
+            },
+            message.to_owned(),
+        ));
     }
     Ok(value)
 }
@@ -832,10 +856,10 @@ fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
     stream.shutdown(Shutdown::Write)?;
     let mut response = Vec::new();
     stream
-        .take(32 * 1024 * 1024 + 1)
+        .take(agent::MAX_MESSAGE as u64 + 1)
         .read_to_end(&mut response)?;
-    if response.len() > 32 * 1024 * 1024 {
-        return Err(io::Error::other("host response exceeds 32 MiB"));
+    if response.len() > agent::MAX_MESSAGE {
+        return Err(io::Error::other("host response exceeds transport limit"));
     }
     Ok(response)
 }
@@ -918,25 +942,112 @@ fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
         {
             return Err(io::Error::last_os_error());
         }
-        let mut result = vec![0; 32 * 1024 * 1024];
-        let mut read = 0;
-        if unsafe {
-            ReadFile(
-                pipe,
-                result.as_mut_ptr(),
-                result.len() as u32,
-                &mut read,
-                std::ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
+        let mut result = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 8192];
+            let mut read = 0;
+            let ok = unsafe {
+                ReadFile(
+                    pipe,
+                    chunk.as_mut_ptr(),
+                    chunk.len() as u32,
+                    &mut read,
+                    std::ptr::null_mut(),
+                )
+            } != 0;
+            result.extend_from_slice(&chunk[..read as usize]);
+            if result.len() > agent::MAX_MESSAGE {
+                return Err(io::Error::other("host response exceeds transport limit"));
+            }
+            if ok {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(234) {
+                return Err(error);
+            }
         }
-        result.truncate(read as usize);
         Ok(result)
     })();
     unsafe {
         CloseHandle(pipe);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abandoned_gui_session_can_be_replaced_without_sharing_edit_access() {
+        let mut core = Core::new(None, AgentMode::Off).unwrap();
+        let first = core.handle(
+            agent::Request::GuiAttach {
+                token: "owner".into(),
+            },
+            "owner",
+            "agent",
+        );
+        let agent::Response::Gui {
+            session: Some(first),
+            ..
+        } = first
+        else {
+            panic!("first GUI should attach");
+        };
+        assert!(matches!(
+            core.handle(
+                agent::Request::GuiAttach {
+                    token: "owner".into()
+                },
+                "owner",
+                "agent"
+            ),
+            agent::Response::Error { .. }
+        ));
+        core.gui_last_seen = Some(Instant::now() - GUI_SESSION_TIMEOUT);
+        let next = core.handle(
+            agent::Request::GuiAttach {
+                token: "owner".into(),
+            },
+            "owner",
+            "agent",
+        );
+        let agent::Response::Gui {
+            session: Some(next),
+            ..
+        } = next
+        else {
+            panic!("expired GUI session should be replaced");
+        };
+        assert_ne!(first, next);
+        assert!(matches!(
+            core.handle(
+                agent::Request::GuiEdit {
+                    token: "owner".into(),
+                    session: first,
+                    base_revision: 0,
+                    text: "old client".into(),
+                },
+                "owner",
+                "agent",
+            ),
+            agent::Response::Error { .. }
+        ));
+        assert!(matches!(
+            core.handle(
+                agent::Request::GuiEdit {
+                    token: "owner".into(),
+                    session: next,
+                    base_revision: 0,
+                    text: "new client".into(),
+                },
+                "owner",
+                "agent",
+            ),
+            agent::Response::Gui { .. }
+        ));
+        core.recovery.finish();
+    }
 }

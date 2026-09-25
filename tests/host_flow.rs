@@ -142,6 +142,29 @@ fn raw(endpoint: &Value, request: Value) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn gui_round_trip_handles_json_expansion_beyond_old_transport_limit() {
+    let (host, _) = start();
+    let owner = endpoint(&host, "host");
+    let attached = raw(
+        &owner,
+        json!({"command":"gui_attach","token":owner["token"]}),
+    );
+    let session = attached["session"].as_str().unwrap();
+    let text = "\u{1}".repeat(6 * 1024 * 1024);
+    let edited = raw(
+        &owner,
+        json!({"command":"gui_edit","token":owner["token"],"session":session,"base_revision":0,"text":text}),
+    );
+    assert_eq!(edited["state"]["text"].as_str().unwrap().len(), text.len());
+    let refreshed = raw(
+        &owner,
+        json!({"command":"gui_state","token":owner["token"],"session":session}),
+    );
+    assert_eq!(refreshed["state"]["text"].as_str().unwrap(), text);
+}
+
 #[test]
 fn headless_edits_save_conflict_and_stop() {
     let (host, path) = start();
@@ -231,6 +254,20 @@ fn headless_edits_save_conflict_and_stop() {
             json!({"command":"gui_edit","token":owner["token"],"session":session,"base_revision":1,"text":"third"}),
         );
         assert_eq!(edited["state"]["text"], "third");
+        assert_eq!(
+            raw(
+                &owner,
+                json!({"command":"gui_edit","token":owner["token"],"session":session,"base_revision":1,"text":"unsent local text"})
+            )["error"]["code"],
+            "stale_revision"
+        );
+        assert_eq!(
+            raw(
+                &owner,
+                json!({"command":"gui_state","token":owner["token"],"session":session})
+            )["state"]["text"],
+            "third"
+        );
         let revision = edited["state"]["identity"]["revision"].as_u64().unwrap();
         let depth = edited["state"]["undo_depth"].as_u64().unwrap();
         assert_eq!(

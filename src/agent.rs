@@ -13,7 +13,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-const MAX_MESSAGE: usize = 32 * 1024 * 1024;
+// A 16 MiB UTF-8 buffer can expand sixfold when JSON escapes control bytes.
+pub(crate) const MAX_MESSAGE: usize = 128 * 1024 * 1024;
 const MAX_AGENT_RESPONSE: usize = 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
@@ -677,8 +678,8 @@ fn create_named_pipe(
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
-            MAX_MESSAGE as u32,
-            MAX_MESSAGE as u32,
+            64 * 1024,
+            64 * 1024,
             5_000,
             &mut security,
         )
@@ -757,7 +758,7 @@ fn dispatch(
 ) -> Response {
     if bytes.len() > MAX_MESSAGE {
         return Response::Error {
-            error: ApiError::new("message_too_large", "request exceeds one MiB"),
+            error: ApiError::new("message_too_large", "request exceeds transport limit"),
         };
     }
     let request = match serde_json::from_slice(bytes) {
@@ -839,6 +840,7 @@ fn handle_unix_client(
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
     use std::io::{Read as _, Write as _};
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
@@ -919,19 +921,33 @@ fn handle_windows_client(
     tx: &Sender<HostRequest>,
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
-    let mut bytes = vec![0_u8; MAX_MESSAGE + 1];
-    let mut read = 0;
-    if unsafe {
-        ReadFile(
-            pipe,
-            bytes.as_mut_ptr(),
-            bytes.len() as u32,
-            &mut read,
-            std::ptr::null_mut(),
-        )
-    } != 0
-    {
-        bytes.truncate(read as usize);
+    let mut bytes = Vec::new();
+    let mut complete = false;
+    loop {
+        let mut chunk = [0_u8; 8192];
+        let mut read = 0;
+        let ok = unsafe {
+            ReadFile(
+                pipe,
+                chunk.as_mut_ptr(),
+                chunk.len() as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        } != 0;
+        bytes.extend_from_slice(&chunk[..read as usize]);
+        if bytes.len() > MAX_MESSAGE {
+            break;
+        }
+        if ok {
+            complete = true;
+            break;
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(234) {
+            break;
+        }
+    }
+    if complete || bytes.len() > MAX_MESSAGE {
         let response = dispatch(&bytes, tx, wake);
         if let Ok(encoded) = serde_json::to_vec(&response) {
             let mut written = 0;
@@ -1005,7 +1021,7 @@ mod tests {
 
     #[test]
     fn snapshot_response_accounts_for_json_escaping() {
-        let text = "\u{1}".repeat(MAX_MESSAGE);
+        let text = "\u{1}".repeat(1024 * 1024);
         let document = document::Document::new(&text, usize::MAX);
         let snapshot = document.snapshot(
             &text,
@@ -1018,7 +1034,7 @@ mod tests {
         );
         let response = bounded_snapshot_response(snapshot);
         let encoded = serde_json::to_vec(&response).unwrap();
-        assert!(encoded.len() <= MAX_MESSAGE);
+        assert!(encoded.len() <= MAX_AGENT_RESPONSE);
         let Response::Ok { snapshot } = response else {
             panic!("bounded snapshot should fit in the transport");
         };

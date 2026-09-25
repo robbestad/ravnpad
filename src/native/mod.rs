@@ -415,7 +415,8 @@ impl Native {
             rp_lock();
         }
         if matches!(action, Action::Quit)
-            && (!self.app.is_dirty() || self.app.host_client.is_some())
+            && (!self.app.is_dirty()
+                || (self.app.host_client.is_some() && !self.app.host_conflict_pending))
         {
             self.app.close_requested = true;
             return;
