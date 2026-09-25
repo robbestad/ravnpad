@@ -165,6 +165,95 @@ fn gui_round_trip_handles_json_expansion_beyond_old_transport_limit() {
     assert_eq!(refreshed["state"]["text"].as_str().unwrap(), text);
 }
 
+#[cfg(unix)]
+#[test]
+fn gui_save_rejects_an_unseen_revision() {
+    let (host, path) = start();
+    let owner = endpoint(&host, "host");
+    let attached = raw(
+        &owner,
+        json!({"command":"gui_attach","token":owner["token"]}),
+    );
+    let session = attached["session"].as_str().unwrap();
+    assert_eq!(
+        raw(
+            &owner,
+            json!({"command":"gui_edit","token":owner["token"],"session":session,"base_revision":0,"text":"new text"})
+        )["status"],
+        "gui"
+    );
+    let other = host.root.path().join("other.txt");
+    for command in ["gui_save", "gui_save_as"] {
+        let mut request =
+            json!({"command":command,"token":owner["token"],"session":session,"base_revision":0});
+        if command == "gui_save_as" {
+            request["path"] = json!(other);
+        }
+        assert_eq!(raw(&owner, request)["error"]["code"], "stale_revision");
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "first");
+    assert!(!other.exists());
+    assert_eq!(
+        raw(
+            &owner,
+            json!({"command":"gui_save","token":owner["token"],"session":session,"base_revision":1})
+        )["status"],
+        "saved"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reenabled_agent_access_uses_a_new_token() {
+    let (host, _) = start();
+    let owner = endpoint(&host, "host");
+    let old = endpoint(&host, "agent");
+    assert_eq!(
+        raw(
+            &owner,
+            json!({"command":"host_set_mode","token":owner["token"],"mode":"off"})
+        )["status"],
+        "mode"
+    );
+    assert_eq!(
+        raw(
+            &owner,
+            json!({"command":"host_set_mode","token":owner["token"],"mode":"edit"})
+        )["status"],
+        "mode"
+    );
+    let mut rotated = None;
+    for _ in 0..100 {
+        if let Ok(bytes) = std::fs::read(
+            config_dir(host.root.path())
+                .join("agent")
+                .join(format!("{}.json", host.instance)),
+        ) {
+            let current: Value = serde_json::from_slice(&bytes).unwrap();
+            if current["token"] != old["token"] {
+                rotated = Some(current);
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let rotated = rotated.expect("agent token should rotate on re-enable");
+    assert_eq!(
+        raw(
+            &owner,
+            json!({"command":"document_status","token":old["token"]})
+        )["error"]["code"],
+        "unauthorized"
+    );
+    assert_eq!(
+        raw(
+            &owner,
+            json!({"command":"document_status","token":rotated["token"]})
+        )["status"],
+        "document"
+    );
+}
+
 #[test]
 fn headless_edits_save_conflict_and_stop() {
     let (host, path) = start();
@@ -456,7 +545,7 @@ fn pathless_document_needs_explicit_save_as() {
     let path = host.root.path().join("draft.txt");
     let save_as = raw(
         &owner,
-        json!({"command":"gui_save_as","token":owner["token"],"session":session,"path":path}),
+        json!({"command":"gui_save_as","token":owner["token"],"session":session,"base_revision":edited["state"]["identity"]["revision"],"path":path}),
     );
     assert_eq!(save_as["status"], "saved");
     assert_eq!(std::fs::read_to_string(path).unwrap(), "draft");
@@ -506,7 +595,7 @@ fn host_restores_and_clears_recovery_after_save() {
     let path = host.root.path().join("saved.txt");
     let saved = raw(
         &owner,
-        json!({"command":"gui_save_as","token":owner["token"],"session":session,"path":path}),
+        json!({"command":"gui_save_as","token":owner["token"],"session":session,"base_revision":restored["state"]["identity"]["revision"],"path":path}),
     );
     assert_eq!(saved["status"], "saved");
     assert_eq!(std::fs::read_to_string(path).unwrap(), "restored æøå");

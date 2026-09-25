@@ -703,8 +703,8 @@ impl RavnPad {
     }
 
     fn refresh_document(&mut self) {
-        if self.host_client.is_some() && !self.host_conflict_pending {
-            let changed = self.text != self.host_synced_text;
+        if self.host_client.is_some() {
+            let changed = !self.host_conflict_pending && self.text != self.host_synced_text;
             let due = std::time::Instant::now() >= self.host_poll_due;
             if changed || due {
                 let result = if changed {
@@ -715,15 +715,19 @@ impl RavnPad {
                 match result {
                     Ok(state) => {
                         let state = state.clone();
-                        if self.text != state.text || self.document.identity() != &state.identity {
-                            self.apply_host_state(&state);
+                        if !self.host_conflict_pending {
+                            if self.text != state.text
+                                || self.document.identity() != &state.identity
+                            {
+                                self.apply_host_state(&state);
+                            }
+                            if !state.dirty {
+                                self.saved_text = state.text.clone();
+                            }
+                            self.host_synced_text = state.text;
+                            self.path = state.path;
+                            self.dirty = state.dirty;
                         }
-                        if !state.dirty {
-                            self.saved_text = state.text.clone();
-                        }
-                        self.host_synced_text = state.text;
-                        self.path = state.path;
-                        self.dirty = state.dirty;
                     }
                     Err(error) => {
                         if changed
@@ -732,17 +736,13 @@ impl RavnPad {
                                 io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
                             )
                         {
-                            self.host_conflict_pending = true;
-                            let _ = self
-                                .recovery
-                                .tx
-                                .send(recovery::Command::Snapshot(Some(self.text.clone())));
+                            self.preserve_local_host_text();
                             if error.kind() == io::ErrorKind::WouldBlock {
                                 self.resolve_host_conflict();
                             } else {
                                 self.error = Some(AppError::Settings(error));
                             }
-                        } else {
+                        } else if !self.host_conflict_pending {
                             self.error = Some(AppError::Settings(error));
                         }
                     }
@@ -750,6 +750,10 @@ impl RavnPad {
                 self.host_poll_due =
                     std::time::Instant::now() + std::time::Duration::from_millis(100);
             }
+            self.ctx.request_repaint_after(
+                self.host_poll_due
+                    .saturating_duration_since(std::time::Instant::now()),
+            );
         }
         if !self.cache_valid {
             if self.host_client.is_none() {
@@ -810,6 +814,14 @@ impl RavnPad {
         };
         self.cache_valid = false;
         self.spell_dirty = true;
+    }
+
+    fn preserve_local_host_text(&mut self) {
+        self.host_conflict_pending = true;
+        let _ = self
+            .recovery
+            .tx
+            .send(recovery::Command::Snapshot(Some(self.text.clone())));
     }
 
     /// A stale edit must never replace text that has only been typed locally.
@@ -1869,6 +1881,25 @@ impl RavnPad {
                     durability_warning: warning.map(io::Error::other),
                 })
             })();
+            if let Err(error) = &result
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
+                )
+            {
+                self.file_busy = false;
+                self.preserve_local_host_text();
+                if error.kind() == io::ErrorKind::WouldBlock && self.resolve_host_conflict() {
+                    return self.begin_save(path);
+                }
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    self.error = Some(AppError::Settings(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        error.to_string(),
+                    )));
+                }
+                return false;
+            }
             let _ = self.file_tx.send(FileEvent::Save(path, text, result));
             return true;
         }

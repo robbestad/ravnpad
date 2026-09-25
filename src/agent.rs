@@ -78,10 +78,12 @@ pub enum Request {
     GuiSave {
         token: String,
         session: String,
+        base_revision: u64,
     },
     GuiSaveAs {
         token: String,
         session: String,
+        base_revision: u64,
         path: PathBuf,
     },
     GuiRecover {
@@ -370,6 +372,10 @@ impl Server {
 
     pub fn try_recv(&self) -> Result<HostRequest, mpsc::TryRecvError> {
         self.rx.try_recv()
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<HostRequest, mpsc::RecvTimeoutError> {
+        self.rx.recv_timeout(timeout)
     }
 
     pub fn authorizes(&self, request: &Request) -> bool {

@@ -505,9 +505,16 @@ impl Core {
                 base_revision,
                 ..
             } => self.undo_redo(&token, owner, &session, base_revision, false),
-            R::GuiSave { session, .. } => {
+            R::GuiSave {
+                session,
+                base_revision,
+                ..
+            } => {
                 if !self.gui_authorized(&token, &session, owner) {
                     return Self::error("unauthorized", "GUI session required");
+                }
+                if base_revision != self.document.identity().revision {
+                    return Self::error("stale_revision", "document changed; reread before saving");
                 }
                 match self.save() {
                     Ok(result) => agent::Response::Saved {
@@ -524,9 +531,17 @@ impl Core {
                     ),
                 }
             }
-            R::GuiSaveAs { session, path, .. } => {
+            R::GuiSaveAs {
+                session,
+                base_revision,
+                path,
+                ..
+            } => {
                 if !self.gui_authorized(&token, &session, owner) {
                     return Self::error("unauthorized", "GUI session required");
+                }
+                if base_revision != self.document.identity().revision {
+                    return Self::error("stale_revision", "document changed; reread before saving");
                 }
                 match self.save_as(path) {
                     Ok(result) => agent::Response::Saved {
@@ -567,7 +582,7 @@ pub fn run(path: Option<PathBuf>, mode: AgentMode) -> io::Result<()> {
     })?;
     cleanup_stale_endpoints(&base);
     let server = agent::Server::start_in(&instance, base.join("host"), Arc::new(|| {}))?;
-    let agent_token = agent::new_token()?;
+    let mut agent_token = agent::new_token()?;
     let agent_dir = base.join("agent");
     let mut agent_path = None;
     if mode != AgentMode::Off {
@@ -585,7 +600,18 @@ pub fn run(path: Option<PathBuf>, mode: AgentMode) -> io::Result<()> {
     use io::Write as _;
     io::stdout().flush()?;
     while !core.stop {
-        while let Ok(request) = server.try_recv() {
+        let timeout = core
+            .recovery_due
+            .map(|due| due.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_secs(3600));
+        let pending = match server.recv_timeout(timeout) {
+            Ok(request) => Some(request),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("host IPC listener stopped"));
+            }
+        };
+        if let Some(request) = pending {
             let response = core.handle(request.request.clone(), server.token(), &agent_token);
             request.respond(response);
             if core.mode == AgentMode::Off && agent_path.is_some() {
@@ -594,6 +620,7 @@ pub fn run(path: Option<PathBuf>, mode: AgentMode) -> io::Result<()> {
                 }
             }
             if core.mode != AgentMode::Off && agent_path.is_none() {
+                agent_token = agent::new_token()?;
                 agent_path = Some(agent::publish_endpoint(
                     &agent_dir,
                     &instance,
@@ -603,7 +630,6 @@ pub fn run(path: Option<PathBuf>, mode: AgentMode) -> io::Result<()> {
             }
         }
         core.flush_recovery_if_due();
-        std::thread::sleep(Duration::from_millis(10));
     }
     if let Some(path) = agent_path {
         let _ = std::fs::remove_file(path);
@@ -782,7 +808,10 @@ impl Client {
     }
 
     pub fn save(&mut self) -> io::Result<Option<String>> {
-        let response = self.command("gui_save", serde_json::json!({}))?;
+        let response = self.command(
+            "gui_save",
+            serde_json::json!({"base_revision":self.state.identity.revision}),
+        )?;
         self.refresh()?;
         Ok(response
             .get("durability_warning")
@@ -791,7 +820,10 @@ impl Client {
     }
 
     pub fn save_as(&mut self, path: &std::path::Path) -> io::Result<Option<String>> {
-        let response = self.command("gui_save_as", serde_json::json!({"path":path}))?;
+        let response = self.command(
+            "gui_save_as",
+            serde_json::json!({"base_revision":self.state.identity.revision,"path":path}),
+        )?;
         self.refresh()?;
         Ok(response
             .get("durability_warning")
