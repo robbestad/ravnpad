@@ -476,8 +476,10 @@ impl Core {
                     return Self::error("unsaved_changes", "save or use --discard to stop");
                 }
                 if discard && self.dirty() {
+                    if let Err(error) = self.recovery.snapshot_checked(self.text.clone()) {
+                        return Self::error("recovery_failed", error.to_string());
+                    }
                     self.recovery_due = None;
-                    self.snapshot();
                 } else {
                     let _ = self.recovery.tx.send(recovery::Command::Snapshot(None));
                 }
@@ -1168,6 +1170,31 @@ fn exchange_bytes(address: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discard_stop_waits_for_recovery_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocked = directory.path().join("not-a-directory");
+        std::fs::write(&blocked, "file").unwrap();
+        let mut core = Core::new(None, AgentMode::Off).unwrap();
+        core.recovery.finish();
+        core.recovery = recovery::Recovery::start_in(Some(blocked));
+        core.changed("unsaved text".into());
+
+        assert!(matches!(
+            core.handle(
+                agent::Request::HostStop {
+                    token: "owner".into(),
+                    discard: true,
+                },
+                "owner",
+                "agent",
+            ),
+            agent::Response::Error { .. }
+        ));
+        assert!(!core.stop);
+        assert_eq!(core.text, "unsaved text");
+    }
 
     #[test]
     fn gui_liveness_lock_tracks_client_lifetime() {

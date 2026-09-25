@@ -4,12 +4,14 @@ use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
+    time::Duration,
 };
 
 use fs2::FileExt as _;
 
 pub enum Command {
     Snapshot(Option<String>),
+    SnapshotChecked(String, Sender<io::Result<()>>),
     Read(PathBuf),
     Delete(PathBuf),
     Stop,
@@ -110,6 +112,11 @@ impl Recovery {
                     Command::Snapshot(Some(text)) => {
                         crate::storage::save(&path, text.as_bytes()).map(|_| None)
                     }
+                    Command::SnapshotChecked(text, reply) => {
+                        let result = crate::storage::save(&path, text.as_bytes()).map(|_| ());
+                        let _ = reply.send(result);
+                        Ok(None)
+                    }
                     Command::Snapshot(None) => remove(&path).map(|_| None),
                     Command::Read(path) => Ok(Some(match fs::read_to_string(&path) {
                         Ok(text) => Event::Restored(path, text),
@@ -173,6 +180,16 @@ fn remove(path: &std::path::Path) -> io::Result<()> {
 }
 
 impl Recovery {
+    pub fn snapshot_checked(&self, text: String) -> io::Result<()> {
+        let (reply, result) = mpsc::channel();
+        self.tx
+            .send(Command::SnapshotChecked(text, reply))
+            .map_err(|_| io::Error::other("recovery worker unavailable"))?;
+        result
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| io::Error::other("recovery snapshot not confirmed"))?
+    }
+
     pub fn finish(&mut self) {
         // Cocoa termination may exit before Rust destructors run.
         let _ = self.tx.send(Command::Stop);

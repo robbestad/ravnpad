@@ -918,8 +918,15 @@ impl RavnPad {
             .map(|client| client.edit(text).map(|state| state.clone()));
         match result {
             Some(Ok(state)) => self.apply_host_state(&state),
-            Some(Err(error)) => self.error = Some(AppError::Settings(error)),
-            None => {}
+            Some(Err(error)) => {
+                self.text = text.to_owned();
+                self.host_connection_failed(error, true);
+            }
+            None => {
+                self.text = text.to_owned();
+                self.preserve_local_host_text();
+                self.cache_valid = false;
+            }
         }
     }
 
@@ -3045,6 +3052,27 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&copies[0]).unwrap(),
             "unsent local edit"
+        );
+    }
+
+    #[test]
+    fn failed_first_host_seed_keeps_original_text_in_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_dir = dir.path().join("recovery");
+        let mut app = test_app(&recovery_dir);
+        app.seed_host_text("dropped document");
+        assert_eq!(app.text, "dropped document");
+        assert!(app.is_dirty());
+        app.recovery.finish();
+        let copies = std::fs::read_dir(&recovery_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&copies[0]).unwrap(),
+            "dropped document"
         );
     }
 
