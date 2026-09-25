@@ -782,7 +782,7 @@ fn endpoint_is_live(address: &str) -> bool {
 
 #[cfg(windows)]
 fn endpoint_is_live(address: &str) -> bool {
-    exchange_bytes(address, b"{}").is_ok()
+    exchange_bytes(address, b"{}", Duration::from_secs(30)).is_ok()
 }
 
 /// Owner-side client used by the GUI. The session is deliberately distinct from
