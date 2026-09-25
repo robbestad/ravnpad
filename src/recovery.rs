@@ -32,11 +32,11 @@ pub struct Recovery {
 }
 
 impl Recovery {
-    pub fn start(ctx: eframe::egui::Context) -> Self {
-        Self::start_in(ctx, crate::prefs::config_dir().map(|p| p.join("recovery")))
+    pub fn start() -> Self {
+        Self::start_in(crate::prefs::config_dir().map(|p| p.join("recovery")))
     }
 
-    pub(crate) fn start_in(ctx: eframe::egui::Context, dir: Option<PathBuf>) -> Self {
+    pub(crate) fn start_in(dir: Option<PathBuf>) -> Self {
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -45,7 +45,6 @@ impl Recovery {
             };
             if let Err(error) = fs::create_dir_all(&dir) {
                 let _ = events.send(Event::Failed(error));
-                ctx.request_repaint();
                 return;
             }
             let unique = std::time::SystemTime::now()
@@ -68,7 +67,6 @@ impl Recovery {
                 Ok(lock) => lock,
                 Err(error) => {
                     let _ = events.send(Event::Failed(error));
-                    ctx.request_repaint();
                     return;
                 }
             };
@@ -107,7 +105,6 @@ impl Recovery {
                 Err(e) => Event::Failed(e),
             };
             let _ = events.send(event);
-            ctx.request_repaint();
             while let Ok(command) = commands.recv() {
                 let result = match command {
                     Command::Snapshot(Some(text)) => {
@@ -124,11 +121,9 @@ impl Recovery {
                 match result {
                     Ok(Some(event)) => {
                         let _ = events.send(event);
-                        ctx.request_repaint();
                     }
                     Err(e) => {
                         let _ = events.send(Event::Failed(e));
-                        ctx.request_repaint();
                     }
                     _ => {}
                 }
@@ -208,16 +203,16 @@ mod tests {
     #[test]
     fn snapshot_survives_restart_and_restores_exact_unicode() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = eframe::egui::Context::default();
+
         {
-            let worker = Recovery::start_in(ctx.clone(), Some(dir.path().to_owned()));
+            let worker = Recovery::start_in(Some(dir.path().to_owned()));
             assert!(available(&worker).is_empty());
             worker
                 .tx
                 .send(Command::Snapshot(Some("æøå\nunsaved".into())))
                 .unwrap();
         }
-        let worker = Recovery::start_in(ctx, Some(dir.path().to_owned()));
+        let worker = Recovery::start_in(Some(dir.path().to_owned()));
         let paths = available(&worker);
         assert_eq!(paths.len(), 1);
         worker.tx.send(Command::Read(paths[0].clone())).unwrap();
@@ -234,10 +229,7 @@ mod tests {
     #[test]
     fn snapshots_from_a_live_window_are_not_offered() {
         let dir = tempfile::tempdir().unwrap();
-        let live = Recovery::start_in(
-            eframe::egui::Context::default(),
-            Some(dir.path().to_owned()),
-        );
+        let live = Recovery::start_in(Some(dir.path().to_owned()));
         assert!(available(&live).is_empty());
         live.tx
             .send(Command::Snapshot(Some("still being edited".into())))
@@ -252,20 +244,14 @@ mod tests {
             }
             thread::sleep(std::time::Duration::from_millis(10));
         }
-        let worker = Recovery::start_in(
-            eframe::egui::Context::default(),
-            Some(dir.path().to_owned()),
-        );
+        let worker = Recovery::start_in(Some(dir.path().to_owned()));
         assert!(available(&worker).is_empty());
     }
     #[test]
     fn cleanup_is_ordered_after_pending_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let worker = Recovery::start_in(
-                eframe::egui::Context::default(),
-                Some(dir.path().to_owned()),
-            );
+            let worker = Recovery::start_in(Some(dir.path().to_owned()));
             available(&worker);
             worker
                 .tx

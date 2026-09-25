@@ -158,8 +158,7 @@ static int editor_command_enabled(int id) {
     SendMessageW(editor,EM_EXGETSEL,0,(LPARAM)&selection);
     int hasSelection=selection.cpMin!=selection.cpMax;
     switch(id) {
-        case RP_UNDO: return !readonlyDocument&&!busy&&SendMessageW(editor,EM_CANUNDO,0,0);
-        case RP_REDO: return !readonlyDocument&&!busy&&SendMessageW(editor,EM_CANREDO,0,0);
+        case RP_UNDO: case RP_REDO: return !readonlyDocument&&!busy;
         case RP_CUT: return hasSelection&&!readonlyDocument&&!busy;
         case RP_COPY: return hasSelection;
         case RP_PASTE: return !readonlyDocument&&!busy
@@ -281,8 +280,7 @@ static void command(int id) {
         case RP_FIND: show_find(0); return;
         case RP_REPLACE: if(!readonlyDocument) show_find(1); return;
         case RP_NEXT: find_next(1,1); return;
-        case RP_UNDO: SendMessageW(editor,EM_UNDO,0,0); return;
-        case RP_REDO: SendMessageW(editor,EM_REDO,0,0); return;
+        case RP_UNDO: case RP_REDO: rp_action(id); rp_tick(); return;
         case RP_CUT: SendMessageW(editor,WM_CUT,0,0); return;
         case RP_COPY: SendMessageW(editor,WM_COPY,0,0); return;
         case RP_PASTE: SendMessageW(editor,WM_PASTE,0,0); return;
@@ -368,7 +366,7 @@ void rp_run(void) {
     RegisterClassExW(&cls);
     window=CreateWindowExW(0,cls.lpszClassName,L"RavnPad",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,900,650,NULL,NULL,cls.hInstance,NULL);
     if(!window) { FreeLibrary(rich); OleUninitialize(); return; }
-    ACCEL keys[]={{FVIRTKEY|FCONTROL,'N',RP_NEW},{FVIRTKEY|FCONTROL|FSHIFT,'N',RP_NEW_WINDOW},{FVIRTKEY|FCONTROL,'O',RP_OPEN},{FVIRTKEY|FCONTROL,'S',RP_SAVE},{FVIRTKEY|FCONTROL|FSHIFT,'S',RP_SAVE_AS},{FVIRTKEY|FCONTROL,'Q',RP_QUIT},{FVIRTKEY|FCONTROL,'F',RP_FIND},{FVIRTKEY|FCONTROL,'H',RP_REPLACE},{FVIRTKEY,VK_F3,RP_NEXT},{FVIRTKEY|FCONTROL,'A',RP_SELECT_ALL}};
+    ACCEL keys[]={{FVIRTKEY|FCONTROL,'N',RP_NEW},{FVIRTKEY|FCONTROL|FSHIFT,'N',RP_NEW_WINDOW},{FVIRTKEY|FCONTROL,'O',RP_OPEN},{FVIRTKEY|FCONTROL,'S',RP_SAVE},{FVIRTKEY|FCONTROL|FSHIFT,'S',RP_SAVE_AS},{FVIRTKEY|FCONTROL,'Q',RP_QUIT},{FVIRTKEY|FCONTROL,'F',RP_FIND},{FVIRTKEY|FCONTROL,'H',RP_REPLACE},{FVIRTKEY|FCONTROL,'Z',RP_UNDO},{FVIRTKEY|FCONTROL,'Y',RP_REDO},{FVIRTKEY,VK_F3,RP_NEXT},{FVIRTKEY|FCONTROL,'A',RP_SELECT_ALL}};
     accelerators=CreateAcceleratorTableW(keys,sizeof(keys)/sizeof(keys[0]));
     if(smokeTest) {
         const char *sample="Native UTF-8: \xc3\xa6\xc3\xb8\xc3\xa5 \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e \xf0\x9f\x98\x80\nSecond line";

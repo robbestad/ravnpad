@@ -37,12 +37,12 @@ Word is for documents. The web is for everything else. RavnPad is for the file i
 
 ## Agents that ask first
 
-Most AI editors become a chat with a text area attached. RavnPad does the opposite: the notepad stays a notepad. Agent access is controlled for the current process from **Agent → Off / Explore / Edit**. RavnPad starts at Off; the mode is not saved as a preference. Use `--explore-agent` to start in Explore or the compatible `--enable-agent` flag to start in Edit. If both are present, Explore wins.
+Most AI editors become a chat with a text area attached. RavnPad does the opposite: the notepad stays a notepad. Each document is owned by a separate `ravnpad-host` process. The GUI starts one host per document and can reconnect with `ravnpad --connect INSTANCE_ID`. Closing the window detaches it; the host keeps its buffer and recovery copy until explicitly stopped. Agent access is controlled from **Agent → Off / Explore / Edit**. GUI-started hosts start at Off; the mode is not saved as a preference. Use `--explore-agent` to start in Explore or the compatible `--enable-agent` flag to start in Edit. If both are present, Explore wins.
 
 - **Explore is read-only for the agent.** The agent reads what you are looking at, including unsaved edits, while you keep editing and saving normally. Change requests return `read_only` and cannot alter the buffer, revision, dirty state, undo history, or pending proposals.
 - **Edit is explicit.** Switching to Edit keeps the same connection and document identity, but permits validated proposals. Switching back to Explore rejects pending proposals; Off closes and removes the local endpoint. The agent cannot upgrade its own access.
 - **Validated direct edits.** Every patch is bound to the document revision, buffer hash, and expected text. A valid patch becomes one undoable edit and still does not save; a stale or ambiguous patch is rejected for the agent to reread and merge.
-- **Local, owner-only.** Windows uses an owner-only named pipe (remote clients are rejected). macOS and Linux use a private Unix socket. No cloud sidecar, no always-on daemon.
+- **Local, owner-only.** Windows uses an owner-only named pipe (remote clients are rejected). macOS and Linux use a private Unix socket. Owner control has a separate token from agent access.
 
 ```bash
 ravnpad --explore-agent notes.txt
@@ -51,7 +51,10 @@ ravnpad --enable-agent notes.txt
 ravnpad-cli document status --instance INSTANCE_ID --json
 ravnpad-cli document read --instance INSTANCE_ID --document DOCUMENT_ID --json
 ravnpad-cli document propose --instance INSTANCE_ID --document DOCUMENT_ID --stdin --json < patch.json
+ravnpad-cli document save --instance INSTANCE_ID --document DOCUMENT_ID --json
 ```
+
+Start without a GUI with `ravnpad-host start --path notes.txt`. This grants agent read access by default; add `--edit` for validated edits and explicit saves. `document propose` changes only the buffer. A pathless document needs Save As from the GUI before `document save` can write it. Stop a clean host with `ravnpad-cli host stop --instance INSTANCE_ID --json`. A dirty host refuses to stop unless you save it or pass `--discard`; discarding keeps the recovery copy.
 
 Direct file access is separate and read-only:
 
@@ -71,11 +74,11 @@ MCP for Claude, Cursor, Codex, and friends:
 }
 ```
 
-Windows zip: `ravnpad-cli.exe` and `ravnpad-mcp.exe` sit beside `ravnpad.exe`. macOS: both tools live in `RavnPad.app/Contents/Helpers/`. Instance IDs are the JSON filenames in RavnPad’s agent config directory.
+Windows zip: `ravnpad-host.exe`, `ravnpad-cli.exe` and `ravnpad-mcp.exe` sit beside `ravnpad.exe`. macOS: all three helpers live in `RavnPad.app/Contents/Helpers/`. Instance IDs are the JSON filenames in RavnPad’s agent config directory when agent access is enabled, and always in its owner-protected host directory.
 
 Paste-ready agent rules: [ravnpad.com](https://ravnpad.com/#agents).
 
-A patch must include `operation_id`, `document_id`, `base_revision`, `base_hash`, and `edits[]` with `start_byte`, `end_byte`, `expected_text`, and `replacement` (half-open UTF-8 byte ranges). Overlaps, invalid UTF-8 boundaries, mixed line endings, NUL, or more than 128 edits are rejected. Closing RavnPad, opening another document, or restarting drops the handle.
+A patch must include `operation_id`, `document_id`, `base_revision`, `base_hash`, and `edits[]` with `start_byte`, `end_byte`, `expected_text`, and `replacement` (half-open UTF-8 byte ranges). Overlaps, invalid UTF-8 boundaries, mixed line endings, NUL, or more than 128 edits are rejected. Closing the GUI keeps the document handle valid while the host runs.
 
 ## Get it
 

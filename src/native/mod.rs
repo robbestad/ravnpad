@@ -414,7 +414,9 @@ impl Native {
         unsafe {
             rp_lock();
         }
-        if matches!(action, Action::Quit) && !self.app.is_dirty() {
+        if matches!(action, Action::Quit)
+            && (!self.app.is_dirty() || self.app.host_client.is_some())
+        {
             self.app.close_requested = true;
             return;
         }
@@ -528,6 +530,21 @@ impl Native {
                     self.app.save_prefs();
                 }
                 Event::Action(id) => match id {
+                    25 | 26 => {
+                        self.sync_text();
+                        self.app.host_history(id == 25);
+                        if self.app.host_client.is_some() {
+                            unsafe {
+                                rp_replace_text(
+                                    self.app.text.as_ptr().cast(),
+                                    self.app.text.len(),
+                                    std::ptr::null(),
+                                    0,
+                                );
+                            }
+                            self.changed = false;
+                        }
+                    }
                     1 => self.request(Action::New),
                     44 => self.request(Action::NewWindow),
                     2 => self.request(Action::Open),
@@ -674,7 +691,21 @@ impl Native {
         }
         self.app.poll_recovery();
         self.app.poll_files();
+        let before_host = self.app.text.clone();
         self.app.refresh_document();
+        if self.app.host_client.is_some()
+            && self.app.text != before_host
+            && self.app.large.is_none()
+        {
+            unsafe {
+                rp_replace_text(
+                    self.app.text.as_ptr().cast(),
+                    self.app.text.len(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+        }
         if let Ok((view, result)) = self.viewer_rx.try_recv() {
             self.viewer_busy = false;
             self.app.large = Some(view);
@@ -822,6 +853,9 @@ impl Native {
                 AgentMode::Edit => 2,
             });
             if self.app.close_requested {
+                if let Some(mut client) = self.app.host_client.take() {
+                    let _ = client.detach();
+                }
                 self.app.recovery.finish();
                 rp_close();
             } else if !self.app.file_busy {

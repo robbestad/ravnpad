@@ -30,7 +30,7 @@ pub fn hash(text: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(text.as_bytes()))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     pub instance_id: String,
     pub document_id: String,
@@ -88,6 +88,14 @@ impl Document {
 
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+
+    /// Mirror an authoritative host revision in a presentation client.
+    pub fn adopt(&mut self, identity: Identity, text: &str) {
+        self.identity = identity;
+        self.observed_text.clear();
+        self.observed_text.push_str(text);
+        self.proposals.clear();
     }
 
     /// Start tracking a newly opened or newly created document in this instance.

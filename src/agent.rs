@@ -13,7 +13,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-const MAX_MESSAGE: usize = 1024 * 1024;
+const MAX_MESSAGE: usize = 32 * 1024 * 1024;
+const MAX_AGENT_RESPONSE: usize = 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
 const MAX_CLIENT_WORKERS: usize = 16;
@@ -34,6 +35,59 @@ pub enum Request {
         token: String,
         patch: Patch,
     },
+    DocumentSave {
+        token: String,
+        document_id: String,
+    },
+    HostStop {
+        token: String,
+        discard: bool,
+    },
+    HostSetMode {
+        token: String,
+        mode: String,
+    },
+    GuiAttach {
+        token: String,
+    },
+    GuiDetach {
+        token: String,
+        session: String,
+    },
+    GuiState {
+        token: String,
+        session: String,
+    },
+    GuiEdit {
+        token: String,
+        session: String,
+        base_revision: u64,
+        text: String,
+    },
+    GuiUndo {
+        token: String,
+        session: String,
+        base_revision: u64,
+    },
+    GuiRedo {
+        token: String,
+        session: String,
+        base_revision: u64,
+    },
+    GuiSave {
+        token: String,
+        session: String,
+    },
+    GuiSaveAs {
+        token: String,
+        session: String,
+        path: PathBuf,
+    },
+    GuiRecover {
+        token: String,
+        session: String,
+        path: PathBuf,
+    },
 }
 
 impl Request {
@@ -41,7 +95,19 @@ impl Request {
         match self {
             Self::DocumentStatus { token }
             | Self::DocumentRead { token, .. }
-            | Self::DocumentPropose { token, .. } => token,
+            | Self::DocumentPropose { token, .. }
+            | Self::DocumentSave { token, .. }
+            | Self::HostStop { token, .. }
+            | Self::HostSetMode { token, .. }
+            | Self::GuiAttach { token, .. }
+            | Self::GuiDetach { token, .. }
+            | Self::GuiState { token, .. }
+            | Self::GuiEdit { token, .. }
+            | Self::GuiUndo { token, .. }
+            | Self::GuiRedo { token, .. }
+            | Self::GuiSave { token, .. }
+            | Self::GuiSaveAs { token, .. }
+            | Self::GuiRecover { token, .. } => token,
         }
     }
 }
@@ -49,11 +115,33 @@ impl Request {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
-    Document { document: Identity },
-    Ok { snapshot: Snapshot },
-    Applied { proposal: ProposalReceipt },
-    Rejected { proposal: ProposalReceipt },
-    Error { error: ApiError },
+    Document {
+        document: Identity,
+    },
+    Ok {
+        snapshot: Snapshot,
+    },
+    Applied {
+        proposal: ProposalReceipt,
+    },
+    Rejected {
+        proposal: ProposalReceipt,
+    },
+    Saved {
+        revision: u64,
+        durability_warning: Option<String>,
+    },
+    Stopped,
+    Mode {
+        mode: String,
+    },
+    Gui {
+        state: crate::host::HostState,
+        session: Option<String>,
+    },
+    Error {
+        error: ApiError,
+    },
 }
 
 /// Bounded transport representation of a proposal.
@@ -137,7 +225,7 @@ impl ApiError {
 /// JSON escaping can expand a text slice by up to six bytes per input byte, so
 /// bounding the requested raw byte range alone is insufficient.
 pub fn bounded_snapshot_response(mut snapshot: Snapshot) -> Response {
-    if snapshot_response_len(&snapshot) <= MAX_MESSAGE {
+    if snapshot_response_len(&snapshot) <= MAX_AGENT_RESPONSE {
         return Response::Ok { snapshot };
     }
 
@@ -147,7 +235,7 @@ pub fn bounded_snapshot_response(mut snapshot: Snapshot) -> Response {
         .retain(|capability| *capability != "propose");
     loop {
         let length = snapshot_response_len(&snapshot);
-        if length <= MAX_MESSAGE {
+        if length <= MAX_AGENT_RESPONSE {
             break;
         }
         if snapshot.text.is_empty() {
@@ -156,7 +244,7 @@ pub fn bounded_snapshot_response(mut snapshot: Snapshot) -> Response {
             };
         }
         let mut end =
-            ((snapshot.text.len() as u128 * MAX_MESSAGE as u128) / length as u128) as usize;
+            ((snapshot.text.len() as u128 * MAX_AGENT_RESPONSE as u128) / length as u128) as usize;
         end = end.min(snapshot.text.len() - 1);
         while end > 0 && !snapshot.text.is_char_boundary(end) {
             end -= 1;
@@ -225,7 +313,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn start(instance_id: &str, ctx: eframe::egui::Context) -> io::Result<Self> {
+    pub fn start(instance_id: &str, wake: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
         let directory = crate::prefs::config_dir()
             .ok_or_else(|| {
                 io::Error::new(
@@ -234,6 +322,14 @@ impl Server {
                 )
             })?
             .join("agent");
+        Self::start_in(instance_id, directory, wake)
+    }
+
+    pub fn start_in(
+        instance_id: &str,
+        directory: PathBuf,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> io::Result<Self> {
         std::fs::create_dir_all(&directory)?;
         restrict_directory(&directory)?;
         let token = secure_token()?;
@@ -256,7 +352,7 @@ impl Server {
         let listener_active = active.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("ravnpad-agent".into())
-            .spawn(move || listen(listener, &listener_address, listener_active, tx, ctx))
+            .spawn(move || listen(listener, &listener_address, listener_active, tx, wake))
         {
             let _ = std::fs::remove_file(&endpoint_path);
             cleanup_listener_address(&address);
@@ -278,6 +374,39 @@ impl Server {
     pub fn authorizes(&self, request: &Request) -> bool {
         constant_time_eq(self.token.as_bytes(), request.token().as_bytes())
     }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn address(&self) -> &str {
+        &self.listener_address
+    }
+}
+
+pub fn publish_endpoint(
+    directory: &std::path::Path,
+    instance_id: &str,
+    address: &str,
+    token: &str,
+) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(directory)?;
+    restrict_directory(directory)?;
+    let path = directory.join(format!("{instance_id}.json"));
+    write_endpoint(
+        &path,
+        &Endpoint {
+            protocol_version: document::PROTOCOL_VERSION,
+            instance_id: instance_id.into(),
+            address: address.into(),
+            token: token.into(),
+        },
+    )?;
+    Ok(path)
+}
+
+pub fn new_token() -> io::Result<String> {
+    secure_token()
 }
 
 impl Drop for Server {
@@ -378,7 +507,14 @@ fn endpoint_address(_directory: &std::path::Path, instance_id: &str) -> String {
 
 #[cfg(unix)]
 fn endpoint_address(directory: &std::path::Path, instance_id: &str) -> String {
-    directory
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(directory.as_os_str().as_encoded_bytes());
+    let short = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::path::Path::new("/tmp")
+        .join(format!("ravnpad-{short}"))
         .join(format!("{instance_id}.sock"))
         .to_string_lossy()
         .into_owned()
@@ -389,6 +525,11 @@ type PreparedListener = std::os::unix::net::UnixListener;
 
 #[cfg(unix)]
 fn prepare_listener(address: &str) -> io::Result<PreparedListener> {
+    let parent = std::path::Path::new(address)
+        .parent()
+        .ok_or_else(|| io::Error::other("socket has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    restrict_directory(parent)?;
     let _ = std::fs::remove_file(address);
     let listener = std::os::unix::net::UnixListener::bind(address)?;
     listener.set_nonblocking(true)?;
@@ -609,7 +750,11 @@ fn wake_listener(address: &str) {
     }
 }
 
-fn dispatch(bytes: &[u8], tx: &Sender<HostRequest>, ctx: &eframe::egui::Context) -> Response {
+fn dispatch(
+    bytes: &[u8],
+    tx: &Sender<HostRequest>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+) -> Response {
     if bytes.len() > MAX_MESSAGE {
         return Response::Error {
             error: ApiError::new("message_too_large", "request exceeds one MiB"),
@@ -635,7 +780,7 @@ fn dispatch(bytes: &[u8], tx: &Sender<HostRequest>, ctx: &eframe::egui::Context)
             error: ApiError::new("host_unavailable", "document host stopped"),
         };
     }
-    ctx.request_repaint();
+    wake();
     response_rx
         .recv_timeout(RESPONSE_TIMEOUT)
         .unwrap_or_else(|_| Response::Error {
@@ -649,7 +794,7 @@ fn listen(
     _address: &str,
     active: Arc<AtomicBool>,
     tx: Sender<HostRequest>,
-    ctx: eframe::egui::Context,
+    wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     let workers = Arc::new(AtomicUsize::new(0));
     while active.load(Ordering::Acquire) {
@@ -664,13 +809,13 @@ fn listen(
                     continue;
                 }
                 let client_tx = tx.clone();
-                let client_ctx = ctx.clone();
+                let client_wake = wake.clone();
                 let client_active = active.clone();
                 let client_workers = workers.clone();
                 if std::thread::Builder::new()
                     .name("ravnpad-agent-client".into())
                     .spawn(move || {
-                        handle_unix_client(stream, &client_active, &client_tx, &client_ctx);
+                        handle_unix_client(stream, &client_active, &client_tx, &client_wake);
                         client_workers.fetch_sub(1, Ordering::AcqRel);
                     })
                     .is_err()
@@ -691,7 +836,7 @@ fn handle_unix_client(
     mut stream: std::os::unix::net::UnixStream,
     active: &AtomicBool,
     tx: &Sender<HostRequest>,
-    ctx: &eframe::egui::Context,
+    wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
     use std::io::{Read as _, Write as _};
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
@@ -700,7 +845,7 @@ fn handle_unix_client(
     while active.load(Ordering::Acquire) && bytes.len() <= MAX_MESSAGE {
         match stream.read(&mut chunk) {
             Ok(0) => {
-                let response = dispatch(&bytes, tx, ctx);
+                let response = dispatch(&bytes, tx, wake);
                 if let Ok(encoded) = serde_json::to_vec(&response) {
                     let _ = stream.write_all(&encoded);
                 }
@@ -716,7 +861,7 @@ fn handle_unix_client(
         }
     }
     if active.load(Ordering::Acquire) && bytes.len() > MAX_MESSAGE {
-        let response = dispatch(&bytes, tx, ctx);
+        let response = dispatch(&bytes, tx, wake);
         if let Ok(encoded) = serde_json::to_vec(&response) {
             let _ = stream.write_all(&encoded);
         }
@@ -729,7 +874,7 @@ fn listen(
     address: &str,
     active: Arc<AtomicBool>,
     tx: Sender<HostRequest>,
-    ctx: eframe::egui::Context,
+    wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     let mut first_pipe = Some(listener.take_pipe());
     loop {
@@ -753,12 +898,12 @@ fn listen(
         }
         if connected {
             let client_tx = tx.clone();
-            let client_ctx = ctx.clone();
+            let client_wake = wake.clone();
             // A connected client owns this pipe instance. Isolating its
             // blocking read keeps the accept loop available to later clients.
             let pipe_address = pipe as usize;
             std::thread::spawn(move || {
-                handle_windows_client(pipe_address as WindowsHandle, &client_tx, &client_ctx)
+                handle_windows_client(pipe_address as WindowsHandle, &client_tx, &client_wake)
             });
         } else {
             unsafe {
@@ -772,7 +917,7 @@ fn listen(
 fn handle_windows_client(
     pipe: WindowsHandle,
     tx: &Sender<HostRequest>,
-    ctx: &eframe::egui::Context,
+    wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
     let mut bytes = vec![0_u8; MAX_MESSAGE + 1];
     let mut read = 0;
@@ -787,7 +932,7 @@ fn handle_windows_client(
     } != 0
     {
         bytes.truncate(read as usize);
-        let response = dispatch(&bytes, tx, ctx);
+        let response = dispatch(&bytes, tx, wake);
         if let Ok(encoded) = serde_json::to_vec(&response) {
             let mut written = 0;
             unsafe {
@@ -886,9 +1031,11 @@ mod tests {
     #[test]
     fn unix_listener_bind_failures_are_reported_synchronously() {
         let directory = tempfile::tempdir().unwrap();
-        let missing_parent = directory.path().join("missing").join("agent.sock");
-        let error = prepare_listener(&missing_parent.to_string_lossy()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let blocked_parent = directory.path().join("file");
+        std::fs::write(&blocked_parent, b"not a directory").unwrap();
+        let address = blocked_parent.join("agent.sock");
+        let error = prepare_listener(&address.to_string_lossy()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     }
 
     #[cfg(unix)]
