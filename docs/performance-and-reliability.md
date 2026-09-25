@@ -6,6 +6,9 @@ Implemented September 12, 2026:
   and atomically replace the destination. A Unix directory sync error after
   replacement is a committed-save durability warning: the editor updates its
   saved baseline, reports the warning, and cancels an automatic follow-up action.
+  On macOS, a network volume that does not support syncing directory handles
+  does not trigger this warning after the file sync and atomic replacement succeed.
+  Other directory sync errors still trigger the warning.
   Existing symbolic links and security metadata are preserved. Atomic replacement can
   change inode identity; hard links are not preserved as shared writable aliases.
 - Editable file loading and saving run on worker threads. The UI shows progress

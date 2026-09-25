@@ -75,11 +75,14 @@ fn sync_directory(parent: &Path) -> io::Result<()> {
         parent,
         |path| fs::File::open(path),
         fs::File::sync_all,
-        |directory| {
+        |directory, error| {
             #[cfg(target_os = "macos")]
-            return is_macos_smb(directory);
+            return macos_directory_sync_limitation(directory, error);
             #[cfg(not(target_os = "macos"))]
-            false
+            {
+                let _ = (directory, error);
+                false
+            }
         },
     )?;
     #[cfg(not(unix))]
@@ -92,21 +95,50 @@ fn sync_directory_with<T>(
     parent: &Path,
     open: impl FnOnce(&Path) -> io::Result<T>,
     sync: impl FnOnce(&T) -> io::Result<()>,
-    is_supported_network_provider: impl FnOnce(&T) -> bool,
+    is_provider_limitation: impl FnOnce(&T, &io::Error) -> bool,
 ) -> io::Result<()> {
     // Opening and syncing are deliberately separate: an opening failure says
     // nothing about whether this is a provider with a known fsync limitation.
     let directory = open(parent)?;
     match sync(&directory) {
-        #[cfg(target_os = "macos")]
-        Err(error)
-            if error.kind() == io::ErrorKind::PermissionDenied
-                && is_supported_network_provider(&directory) =>
-        {
-            Ok(())
-        }
+        Err(error) if is_provider_limitation(&directory, &error) => Ok(()),
         result => result,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_directory_sync_limitation(directory: &fs::File, error: &io::Error) -> bool {
+    use std::{ffi::CStr, mem::MaybeUninit, os::fd::AsRawFd};
+
+    if error.raw_os_error() != Some(libc::ENOTSUP)
+        && error.kind() != io::ErrorKind::PermissionDenied
+    {
+        return false;
+    }
+    let mut info = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(directory.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let info = unsafe { info.assume_init() };
+    let file_system = unsafe { CStr::from_ptr(info.f_fstypename.as_ptr()) };
+    macos_directory_sync_limitation_for_mount(
+        error,
+        info.f_flags & libc::MNT_LOCAL as u32 == 0,
+        file_system.to_bytes() == b"smbfs",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_directory_sync_limitation_for_mount(
+    error: &io::Error,
+    is_network: bool,
+    is_smb: bool,
+) -> bool {
+    // The file itself has already been synced and atomically replaced. Some
+    // network providers cannot sync a directory handle, so that extra check
+    // cannot be made even though the save succeeded.
+    (error.raw_os_error() == Some(libc::ENOTSUP) && is_network)
+        || (error.kind() == io::ErrorKind::PermissionDenied && is_smb)
 }
 
 #[cfg(target_os = "macos")]
@@ -252,21 +284,60 @@ mod tests {
             Path::new("ignored"),
             |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
             |_| panic!("sync must not run"),
-            |_| true,
+            |_, _| true,
         );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn directory_sync_permission_error_is_ignored_only_for_supported_provider() {
-        let denied = || Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    fn directory_sync_provider_limitation_is_ignored_only_after_open() {
+        let unsupported = || Err(io::Error::from_raw_os_error(libc::ENOTSUP));
         assert!(
-            sync_directory_with(Path::new("ignored"), |_| Ok(()), |_| denied(), |_| true).is_ok()
+            sync_directory_with(
+                Path::new("ignored"),
+                |_| Ok(()),
+                |_| unsupported(),
+                |_, error| error.raw_os_error() == Some(libc::ENOTSUP),
+            )
+            .is_ok()
         );
-        let error = sync_directory_with(Path::new("ignored"), |_| Ok(()), |_| denied(), |_| false)
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let error = sync_directory_with(
+            Path::new("ignored"),
+            |_| Ok(()),
+            |_| unsupported(),
+            |_, _| false,
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOTSUP));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn directory_sync_limitation_is_scoped_to_network_mounts() {
+        let unsupported = io::Error::from_raw_os_error(libc::ENOTSUP);
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        let other = io::Error::other("sync failed");
+
+        assert!(macos_directory_sync_limitation_for_mount(
+            &unsupported,
+            true,
+            false
+        ));
+        assert!(!macos_directory_sync_limitation_for_mount(
+            &unsupported,
+            false,
+            false
+        ));
+        assert!(macos_directory_sync_limitation_for_mount(
+            &denied, true, true
+        ));
+        assert!(!macos_directory_sync_limitation_for_mount(
+            &denied, true, false
+        ));
+        assert!(!macos_directory_sync_limitation_for_mount(
+            &other, true, true
+        ));
     }
 
     #[cfg(target_os = "macos")]
@@ -293,8 +364,13 @@ mod tests {
             .unwrap();
         let path = dir.path().join("note.txt");
 
-        save(&path, b"first").unwrap();
-        save_checked(&path, b"second", Some(b"first")).unwrap();
+        assert!(save(&path, b"first").unwrap().durability_warning.is_none());
+        assert!(
+            save_checked(&path, b"second", Some(b"first"))
+                .unwrap()
+                .durability_warning
+                .is_none()
+        );
 
         assert_eq!(fs::read(&path).unwrap(), b"second");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
