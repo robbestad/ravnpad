@@ -92,9 +92,30 @@ fn run() -> std::io::Result<()> {
     if let Some(path) = path {
         child.arg("--path").arg(path);
     }
+    child.stdin(std::process::Stdio::null());
     child
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        child.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // The serving process must outlive the terminal that invoked `start`.
+        unsafe {
+            child.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
     let mut child = child.spawn()?;
     let stdout = child
         .stdout

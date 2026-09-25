@@ -875,6 +875,12 @@ impl Client {
         command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
         let mut child = command.spawn()?;
         let mut line = String::new();
         let read = io::BufReader::new(
