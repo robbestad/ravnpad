@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     mpsc::{self, Receiver, Sender},
 };
 use std::time::Duration;
@@ -386,9 +386,16 @@ fn snapshot_response_len(snapshot: &Snapshot) -> usize {
 pub struct HostRequest {
     pub request: Request,
     response: Sender<Response>,
+    state: Arc<AtomicU8>,
 }
 
 impl HostRequest {
+    fn begin(&self) -> bool {
+        self.state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
     pub fn respond(self, response: Response) {
         let _ = self.response.send(response);
     }
@@ -466,11 +473,24 @@ impl Server {
     }
 
     pub fn try_recv(&self) -> Result<HostRequest, mpsc::TryRecvError> {
-        self.rx.try_recv()
+        loop {
+            let request = self.rx.try_recv()?;
+            if request.begin() {
+                return Ok(request);
+            }
+        }
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<HostRequest, mpsc::RecvTimeoutError> {
-        self.rx.recv_timeout(timeout)
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let request = self
+                .rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))?;
+            if request.begin() {
+                return Ok(request);
+            }
+        }
     }
 
     pub fn authorizes(&self, request: &Request) -> bool {
@@ -857,6 +877,15 @@ fn dispatch(
     tx: &Sender<HostRequest>,
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) -> Response {
+    dispatch_with_timeout(bytes, tx, wake, None)
+}
+
+fn dispatch_with_timeout(
+    bytes: &[u8],
+    tx: &Sender<HostRequest>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+    timeout_override: Option<Duration>,
+) -> Response {
     if bytes.len() > MAX_MESSAGE {
         return Response::Error {
             error: ApiError::new("message_too_large", "request exceeds transport limit"),
@@ -870,22 +899,26 @@ fn dispatch(
             };
         }
     };
-    let timeout = if matches!(
-        &request,
-        Request::GuiSave { .. }
-            | Request::GuiSaveAs { .. }
-            | Request::DocumentSave { .. }
-            | Request::HostStop { discard: true, .. }
-    ) {
-        SAVE_RESPONSE_TIMEOUT
-    } else {
-        RESPONSE_TIMEOUT
-    };
+    let timeout = timeout_override.unwrap_or_else(|| {
+        if matches!(
+            &request,
+            Request::GuiSave { .. }
+                | Request::GuiSaveAs { .. }
+                | Request::DocumentSave { .. }
+                | Request::HostStop { discard: true, .. }
+        ) {
+            SAVE_RESPONSE_TIMEOUT
+        } else {
+            RESPONSE_TIMEOUT
+        }
+    });
     let (response_tx, response_rx) = mpsc::channel();
+    let state = Arc::new(AtomicU8::new(0));
     if tx
         .send(HostRequest {
             request,
             response: response_tx,
+            state: state.clone(),
         })
         .is_err()
     {
@@ -894,11 +927,26 @@ fn dispatch(
         };
     }
     wake();
-    response_rx
-        .recv_timeout(timeout)
-        .unwrap_or_else(|_| Response::Error {
-            error: ApiError::new("host_timeout", "document host did not respond in time"),
-        })
+    match response_rx.recv_timeout(timeout) {
+        Ok(response) => response,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if state
+                .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                Response::Error {
+                    error: ApiError::new("host_timeout", "document host did not respond in time"),
+                }
+            } else {
+                response_rx.recv().unwrap_or_else(|_| Response::Error {
+                    error: ApiError::new("host_unavailable", "document host stopped"),
+                })
+            }
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Response::Error {
+            error: ApiError::new("host_unavailable", "document host stopped"),
+        },
+    }
 }
 
 #[cfg(unix)]
@@ -1084,6 +1132,39 @@ fn handle_windows_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timed_out_queued_mutation_is_cancelled() {
+        let (tx, rx) = mpsc::channel();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let response = dispatch_with_timeout(
+            br#"{"command":"host_stop","token":"owner","discard":false}"#,
+            &tx,
+            &wake,
+            Some(Duration::from_millis(1)),
+        );
+        assert!(matches!(response, Response::Error { error } if error.code == "host_timeout"));
+        assert!(!rx.recv().unwrap().begin());
+    }
+
+    #[test]
+    fn started_mutation_waits_for_its_real_result() {
+        let (tx, rx) = mpsc::channel();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let caller = std::thread::spawn(move || {
+            dispatch_with_timeout(
+                br#"{"command":"host_stop","token":"owner","discard":false}"#,
+                &tx,
+                &wake,
+                Some(Duration::from_millis(1)),
+            )
+        });
+        let request = rx.recv().unwrap();
+        assert!(request.begin());
+        std::thread::sleep(Duration::from_millis(10));
+        request.respond(Response::Stopped);
+        assert!(matches!(caller.join().unwrap(), Response::Stopped));
+    }
 
     #[test]
     fn token_comparison_checks_length_and_contents() {

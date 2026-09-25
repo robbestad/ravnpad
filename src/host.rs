@@ -672,6 +672,99 @@ impl Core {
     }
 }
 
+pub fn run_launcher(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+    embedded: bool,
+) -> io::Result<()> {
+    use io::{BufRead as _, Write as _};
+    let command = args.next().unwrap_or_default();
+    if command != "start" && command != "serve" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: ravnpad-host start|serve [--path FILE] [--agent off|explore|edit]",
+        ));
+    }
+    let mut path = None;
+    let mut mode = if command == "start" {
+        AgentMode::Explore
+    } else {
+        AgentMode::Off
+    };
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--path" => {
+                path = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| io::Error::other("--path requires a file"))?,
+                ));
+            }
+            "--agent" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| io::Error::other("--agent requires a mode"))?;
+                mode = AgentMode::parse(&value.to_string_lossy())
+                    .ok_or_else(|| io::Error::other("invalid agent mode"))?;
+            }
+            "--edit" => mode = AgentMode::Edit,
+            "--off" => mode = AgentMode::Off,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unknown option",
+                ));
+            }
+        }
+    }
+    if command == "serve" {
+        return run(path, mode);
+    }
+    let exe = std::env::current_exe()?;
+    let mut child = std::process::Command::new(exe);
+    if embedded {
+        child.arg("--ravnpad-host");
+    }
+    child.arg("serve").arg("--agent").arg(mode.name());
+    if let Some(path) = path {
+        child.arg("--path").arg(path);
+    }
+    child.stdin(std::process::Stdio::null());
+    child
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        child.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // The serving process must outlive the terminal that invoked `start`.
+        unsafe {
+            child.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+    let mut child = child.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("host stdout unavailable"))?;
+    let mut line = String::new();
+    io::BufReader::new(stdout).read_line(&mut line)?;
+    if line.is_empty() {
+        return Err(io::Error::other("host failed to start"));
+    }
+    io::stdout().write_all(line.as_bytes())?;
+    Ok(())
+}
+
 pub fn run(path: Option<PathBuf>, mode: AgentMode) -> io::Result<()> {
     let mut core = Core::new(path, mode)?;
     let instance = core.document.identity().instance_id.clone();
@@ -871,7 +964,7 @@ impl Client {
         };
         let sibling = current.with_file_name(name);
         #[cfg(target_os = "macos")]
-        let exe = if sibling.exists() {
+        let preferred = if sibling.exists() {
             sibling
         } else {
             current
@@ -882,8 +975,13 @@ impl Client {
                 .join(name)
         };
         #[cfg(not(target_os = "macos"))]
-        let exe = sibling;
+        let preferred = sibling;
+        let embedded = !preferred.is_file();
+        let exe = if embedded { current } else { preferred };
         let mut command = std::process::Command::new(exe);
+        if embedded {
+            command.arg("--ravnpad-host");
+        }
         command.arg("start").arg("--agent").arg(mode.name());
         if let Some(path) = path {
             command.arg("--path").arg(path);

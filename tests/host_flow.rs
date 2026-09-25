@@ -102,6 +102,35 @@ fn start_named_with_mode(name: &std::ffi::OsStr, mode: &str) -> (Running, PathBu
     )
 }
 
+#[test]
+fn gui_executable_can_start_embedded_host_without_helper_binary() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("embedded.txt");
+    std::fs::write(&path, "embedded host").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ravnpad"));
+    configure(&mut command, root.path());
+    let output = command
+        .args(["--ravnpad-host", "start", "--path"])
+        .arg(&path)
+        .args(["--agent", "off"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ids: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let instance = ids["instance_id"].as_str().unwrap();
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_ravnpad-cli"));
+    configure(&mut cli, root.path());
+    let stopped = cli
+        .args(["host", "stop", "--instance", instance, "--json"])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success());
+}
+
 #[cfg(unix)]
 #[test]
 fn failed_agent_endpoint_publication_keeps_host_and_mode() {

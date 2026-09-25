@@ -50,6 +50,13 @@ const REDO: KeyboardShortcut =
 const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 
 fn main() -> eframe::Result {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--ravnpad-host")) {
+        if let Err(error) = host::run_launcher(std::env::args_os().skip(2), true) {
+            eprintln!("ravnpad-host: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     #[cfg(any(target_os = "macos", windows))]
     {
         native::run();
