@@ -792,13 +792,18 @@ impl Client {
             .stderr(std::process::Stdio::inherit());
         let mut child = command.spawn()?;
         let mut line = String::new();
-        io::BufReader::new(
+        let read = io::BufReader::new(
             child
                 .stdout
                 .take()
                 .ok_or_else(|| io::Error::other("host stdout missing"))?,
         )
-        .read_line(&mut line)?;
+        .read_line(&mut line);
+        let status = child.wait()?;
+        read?;
+        if !status.success() {
+            return Err(io::Error::other("host launcher failed"));
+        }
         let value: serde_json::Value = serde_json::from_str(&line)?;
         let instance = value
             .get("instance_id")
@@ -905,11 +910,19 @@ impl Client {
         self.command("gui_detach", serde_json::json!({}))
             .map(|_| ())
     }
+
+    pub fn abandon(mut self) {
+        // The connection is broken; let the host expire this session if it
+        // survived, without blocking GUI recovery on another IPC attempt.
+        self.session.clear();
+    }
 }
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = self.detach();
+        if !self.session.is_empty() {
+            let _ = self.detach();
+        }
     }
 }
 

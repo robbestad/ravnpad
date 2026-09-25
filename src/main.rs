@@ -735,20 +735,11 @@ impl RavnPad {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        if changed
-                            && matches!(
-                                error.kind(),
-                                io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
-                            )
-                        {
+                        if changed && error.kind() == io::ErrorKind::WouldBlock {
                             self.preserve_local_host_text();
-                            if error.kind() == io::ErrorKind::WouldBlock {
-                                self.resolve_host_conflict();
-                            } else {
-                                self.error = Some(AppError::Settings(error));
-                            }
-                        } else if !self.host_conflict_pending {
-                            self.error = Some(AppError::Settings(error));
+                            self.resolve_host_conflict();
+                        } else {
+                            self.host_connection_failed(error, changed);
                         }
                     }
                 }
@@ -821,10 +812,25 @@ impl RavnPad {
             .send(recovery::Command::Snapshot(Some(self.text.clone())));
     }
 
+    fn host_connection_failed(&mut self, error: io::Error, local_edit: bool) {
+        if local_edit || self.is_dirty() {
+            self.preserve_local_host_text();
+        }
+        if let Some(client) = self.host_client.take() {
+            client.abandon();
+        }
+        self.agent_mode = AgentMode::Off;
+        self.cache_valid = false;
+        self.error = Some(AppError::Settings(error));
+    }
+
     /// A stale edit must never replace text that has only been typed locally.
     /// The user explicitly chooses which buffer wins before sending another edit.
     fn resolve_host_conflict(&mut self) -> bool {
-        let remote = match self.host_client.as_mut().unwrap().refresh() {
+        let Some(client) = self.host_client.as_mut() else {
+            return false;
+        };
+        let remote = match client.refresh() {
             Ok(state) => state.clone(),
             Err(error) => {
                 self.error = Some(AppError::Settings(error));
@@ -1871,38 +1877,49 @@ impl RavnPad {
         if let Some(client) = self.host_client.as_mut() {
             self.file_busy = true;
             let text = self.text.clone();
-            let result = (|| -> io::Result<storage::SaveOutcome> {
-                if client.state.text != self.text {
-                    client.edit(&self.text)?;
-                }
-                let warning = if client.state.path.as_ref() == Some(&path) {
-                    client.save()?
-                } else {
-                    client.save_as(&path)?
-                };
-                Ok(storage::SaveOutcome {
-                    durability_warning: warning.map(io::Error::other),
-                })
-            })();
-            if let Err(error) = &result
-                && matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
-                )
+            if client.state.text != self.text
+                && let Err(error) = client.edit(&self.text)
             {
                 self.file_busy = false;
-                self.preserve_local_host_text();
-                if error.kind() == io::ErrorKind::WouldBlock && self.resolve_host_conflict() {
-                    return self.begin_save(path);
-                }
-                if error.kind() == io::ErrorKind::PermissionDenied {
-                    self.error = Some(AppError::Settings(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        error.to_string(),
-                    )));
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    self.preserve_local_host_text();
+                    if self.resolve_host_conflict() {
+                        return self.begin_save(path);
+                    }
+                } else {
+                    self.host_connection_failed(error, true);
                 }
                 return false;
             }
+            let result = if client.state.path.as_ref() == Some(&path) {
+                client.save()
+            } else {
+                client.save_as(&path)
+            };
+            if let Err(error) = &result {
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    self.file_busy = false;
+                    self.preserve_local_host_text();
+                    if self.resolve_host_conflict() {
+                        return self.begin_save(path);
+                    }
+                    return false;
+                }
+                if !matches!(
+                    error.kind(),
+                    io::ErrorKind::Other | io::ErrorKind::AlreadyExists
+                ) {
+                    self.file_busy = false;
+                    self.host_connection_failed(
+                        io::Error::new(error.kind(), error.to_string()),
+                        true,
+                    );
+                    return false;
+                }
+            }
+            let result = result.map(|warning| storage::SaveOutcome {
+                durability_warning: warning.map(io::Error::other),
+            });
             let _ = self.file_tx.send(FileEvent::Save(path, text, result));
             return true;
         }
@@ -2966,6 +2983,29 @@ fn avoid_broken_fullscreen(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lost_host_transport_keeps_local_text_in_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_dir = dir.path().join("recovery");
+        let mut app = test_app(&recovery_dir);
+        app.text = "unsent local edit".into();
+        app.host_connection_failed(io::Error::from(io::ErrorKind::BrokenPipe), true);
+        assert_eq!(app.text, "unsent local edit");
+        assert!(app.host_client.is_none());
+        assert!(app.is_dirty());
+        app.recovery.finish();
+        let copies = std::fs::read_dir(&recovery_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&copies[0]).unwrap(),
+            "unsent local edit"
+        );
+    }
 
     #[test]
     fn missing_startup_document_is_reported_in_every_agent_mode() {
