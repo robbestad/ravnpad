@@ -154,12 +154,33 @@ fn run() -> Result<(), CliError> {
                 &json!({ "command": "document_propose", "token": endpoint.token, "patch": patch }),
             )
         }
+        [family, command, rest @ ..] if family == "document" && command == "save" => {
+            let instance = option(rest, "--instance")?;
+            let document = option(rest, "--document")?;
+            ensure_known(rest, &["--instance", "--document", "--json"])?;
+            let endpoint = endpoint(instance)?;
+            ensure_instance(&endpoint, instance)?;
+            send(
+                &endpoint.address,
+                &json!({"command":"document_save","token":endpoint.token,"document_id":document}),
+            )
+        }
+        [family, command, rest @ ..] if family == "host" && command == "stop" => {
+            let instance = option(rest, "--instance")?;
+            ensure_known(rest, &["--instance", "--json"])?;
+            let endpoint = endpoint_in(instance, "host")?;
+            ensure_instance(&endpoint, instance)?;
+            send(
+                &endpoint.address,
+                &json!({"command":"host_stop","token":endpoint.token,"discard":rest.iter().any(|arg| arg == "--discard")}),
+            )
+        }
         _ => Err(CliError::usage(usage())),
     }
 }
 
 fn usage() -> String {
-    "usage:\n  ravnpad-cli file read PATH --json\n  ravnpad-cli document status --instance ID --json\n  ravnpad-cli document read --instance ID --document ID [--offset N --limit N] --json\n  ravnpad-cli document propose --instance ID --document ID --stdin --json".into()
+    "usage:\n  ravnpad-cli file read PATH --json\n  ravnpad-cli document status --instance ID --json\n  ravnpad-cli document read --instance ID --document ID [--offset N --limit N] --json\n  ravnpad-cli document propose --instance ID --document ID --stdin --json\n  ravnpad-cli document save --instance ID --document ID --json\n  ravnpad-cli host stop --instance ID [--discard] --json".into()
 }
 
 fn option<'a>(args: &'a [String], name: &str) -> Result<&'a str, CliError> {
@@ -183,7 +204,7 @@ fn ensure_known(args: &[String], value_options: &[&str]) -> Result<(), CliError>
     let mut index = 0;
     while index < args.len() {
         let argument = args[index].as_str();
-        if argument == "--json" || argument == "--stdin" {
+        if argument == "--json" || argument == "--stdin" || argument == "--discard" {
             index += 1;
             continue;
         }
@@ -199,9 +220,13 @@ fn ensure_known(args: &[String], value_options: &[&str]) -> Result<(), CliError>
 }
 
 fn endpoint(instance: &str) -> Result<Endpoint, CliError> {
+    endpoint_in(instance, "agent")
+}
+
+fn endpoint_in(instance: &str, directory: &str) -> Result<Endpoint, CliError> {
     let path = config_dir()
         .ok_or_else(|| CliError::unavailable("configuration directory unavailable"))?
-        .join("agent")
+        .join(directory)
         .join(format!("{instance}.json"));
     let bytes = std::fs::read(&path).map_err(|error| {
         CliError::unavailable(format!("RavnPad instance is unavailable: {error}"))

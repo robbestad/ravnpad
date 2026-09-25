@@ -29,6 +29,10 @@ const READ_CMD = `ravnpad-cli document read --instance INSTANCE_ID --document DO
 
 const PROPOSE_CMD = `ravnpad-cli document propose --instance INSTANCE_ID --document DOCUMENT_ID --stdin --json < patch.json`;
 
+const SAVE_CMD = `ravnpad-cli document save --instance INSTANCE_ID --document DOCUMENT_ID --json`;
+
+const HEADLESS_CMD = `ravnpad-host start --path notes.txt`;
+
 const FILE_READ_CMD = `ravnpad-cli file read notes.txt --json`;
 
 const MCP_JSON = `{
@@ -57,13 +61,14 @@ const PATCH_JSON = `{
 const AGENT_INSTRUCTIONS = `RavnPad is a notepad, not an IDE. Agent access is opt-in and local.
 
 Rules:
-- Only talk to a RavnPad process with Agent set to Explore or Edit (or started with --explore-agent / --enable-agent).
+- Only talk to a RavnPad host with Agent set to Explore or Edit (or started with --explore-agent / --enable-agent).
 - Use ravnpad-cli or ravnpad-mcp. Do not write the open file on disk to "help".
-- The live buffer is not the file. Unsaved edits exist only in the editor.
+- The live buffer is not the file. Unsaved edits stay in the host after the GUI closes.
 - Workflow: document status → document read. Only use document propose when the user has selected Agent → Edit.
 - Explore permits status and live-buffer reads. A proposal returns read_only without changing document state. The agent cannot upgrade access.
 - Propose a UTF-8 byte patch. RavnPad applies it directly when its document ID, revision, buffer hash, ranges, and expected text still match.
 - A valid patch is one undoable edit to the buffer and does not save the file. If validation fails, reread the live buffer and merge against the current text.
+- Use document save explicitly to write the file after a proposal. It requires Edit mode and checks for external file changes.
 - Direct file access is separate and read-only: ravnpad-cli file read PATH --json.
 
 Patch contract:
@@ -72,8 +77,8 @@ Patch contract:
 - Reject yourself before sending: overlapping edits, invalid UTF-8 boundaries, mixed line endings, NUL, or more than 128 edits.
 - Bind the patch to the current base_revision and base_hash from document status/read. Stale revisions are rejected.
 
-Windows release zip: ravnpad-cli.exe and ravnpad-mcp.exe sit beside ravnpad.exe.
-macOS app: both tools are in RavnPad.app/Contents/Helpers/.
+Windows release zip: ravnpad-host.exe, ravnpad-cli.exe and ravnpad-mcp.exe sit beside ravnpad.exe.
+macOS app: all three helpers are in RavnPad.app/Contents/Helpers/.
 Instance IDs are the JSON filenames in RavnPad's agent config directory.`;
 
 type Platform = "windows" | "mac-arm" | "mac-intel" | "other";
@@ -141,11 +146,11 @@ const FEATURES = [
 const AGENT_POINTS = [
   {
     title: "The notepad stays a notepad",
-    body: "Most AI editors become a chat with a text area attached. RavnPad does the opposite: the editor is the product. Choose Off, Explore, or Edit for this process only.",
+    body: "Most AI editors become a chat with a text area attached. RavnPad does the opposite: the editor is the product. Choose Off, Explore, or Edit for the document host.",
   },
   {
     title: "Live buffer, not the disk",
-    body: "Agents read what you are looking at, including unsaved edits. They never fall back to the file on disk. Closing the window, opening another document, or restarting drops the handle.",
+    body: "Agents read the live buffer, including unsaved edits. The document host continues after the GUI closes until explicitly stopped.",
   },
   {
     title: "Read first, edit explicitly",
@@ -153,7 +158,7 @@ const AGENT_POINTS = [
   },
   {
     title: "Local, owner-only",
-    body: "Windows uses an owner-only named pipe; remote clients are rejected. macOS and Linux use a private Unix socket. There is no cloud sidecar and no always-on daemon.",
+    body: "Windows uses an owner-only named pipe; remote clients are rejected. macOS and Linux use a private Unix socket. The host runs locally with separate owner and agent access.",
   },
 ];
 
@@ -468,6 +473,8 @@ export const App = create<Record<string, never>, AppState>({
             <CopySnippet title="Current document" code={STATUS_CMD} />
             <CopySnippet title="Read the live buffer" code={READ_CMD} />
             <CopySnippet title="Propose a patch" code={PROPOSE_CMD} />
+            <CopySnippet title="Save the buffer" code={SAVE_CMD} />
+            <CopySnippet title="Start without a window" code={HEADLESS_CMD} />
             <CopySnippet title="Read a file (read-only)" code={FILE_READ_CMD} />
             <CopySnippet title="MCP server (Claude, Cursor, Codex)" code={MCP_JSON} />
             <CopySnippet title="Patch shape" code={PATCH_JSON} />
@@ -475,9 +482,9 @@ export const App = create<Record<string, never>, AppState>({
 
           <CopySnippet title="Instructions for agents" code={AGENT_INSTRUCTIONS} />
           <p className="macos-note">
-            Windows zip: <code>ravnpad-cli.exe</code> and{" "}
+            Windows zip: <code>ravnpad-host.exe</code>, <code>ravnpad-cli.exe</code> and{" "}
             <code>ravnpad-mcp.exe</code> sit beside <code>ravnpad.exe</code>.
-            macOS: both tools live in{" "}
+            macOS: all three helpers live in{" "}
             <code>RavnPad.app/Contents/Helpers/</code>. Point the MCP{" "}
             <code>command</code> at that binary if it is not on your PATH.
           </p>

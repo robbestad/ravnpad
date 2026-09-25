@@ -18,6 +18,7 @@ mod agent;
 mod associate;
 mod document;
 mod fonts;
+mod host;
 mod i18n;
 mod large;
 #[cfg(target_os = "macos")]
@@ -43,9 +44,19 @@ const SAVE_AS: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
+const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+const REDO: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 
 fn main() -> eframe::Result {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--ravnpad-host")) {
+        if let Err(error) = host::run_launcher(std::env::args_os().skip(2), true) {
+            eprintln!("ravnpad-host: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     #[cfg(any(target_os = "macos", windows))]
     {
         native::run();
@@ -104,10 +115,29 @@ fn initial_path() -> Option<PathBuf> {
 fn initial_path_from(
     args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
 ) -> Option<PathBuf> {
-    args.into_iter()
-        .map(|arg| arg.as_ref().to_owned())
-        .find(|arg| arg != "--enable-agent" && arg != "--explore-agent")
-        .map(PathBuf::from)
+    let mut args = args.into_iter().map(|arg| arg.as_ref().to_owned());
+    while let Some(arg) = args.next() {
+        if arg == "--connect" {
+            let _ = args.next();
+            continue;
+        }
+        if arg != "--enable-agent" && arg != "--explore-agent" {
+            return Some(PathBuf::from(arg));
+        }
+    }
+    None
+}
+
+fn requested_instance() -> Option<String> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--connect" {
+            return args
+                .next()
+                .map(|value| value.to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -208,6 +238,11 @@ struct RavnPad {
     ctx: egui::Context,
     document_generation: u64,
     document: document::Document,
+    host_client: Option<host::Client>,
+    host_synced_text: String,
+    host_conflict_pending: bool,
+    host_oversized: bool,
+    host_poll_due: std::time::Instant,
     agent: Option<agent::Server>,
     agent_mode: AgentMode,
     agent_requested: AgentMode,
@@ -301,13 +336,21 @@ impl RavnPad {
             file_rx,
             file_busy: false,
             after_save: None,
-            recovery: recovery::Recovery::start(ctx.clone()),
+            recovery: recovery::Recovery::start_with_wake(std::sync::Arc::new({
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            })),
             recovery_candidates: Vec::new(),
             recovery_due: None,
             recovered_from: None,
             ctx: ctx.clone(),
             document_generation: 0,
             document,
+            host_client: None,
+            host_synced_text: String::new(),
+            host_conflict_pending: false,
+            host_oversized: false,
+            host_poll_due: std::time::Instant::now(),
             agent: None,
             agent_mode: AgentMode::Off,
             agent_requested,
@@ -365,10 +408,26 @@ impl RavnPad {
             app.start_spellcheck();
         }
 
-        if let Some(path) = initial {
+        if let Some(instance) = requested_instance() {
+            if let Err(error) = app.connect_host(&instance) {
+                app.error = Some(AppError::Settings(error));
+            }
+        } else if let Some(path) = initial {
             app.open_path(path);
-        } else if app.agent_requested != AgentMode::Off {
-            app.start_agent(app.agent_requested);
+        } else {
+            #[cfg(not(test))]
+            {
+                if let Err(error) = app.spawn_host(None) {
+                    app.error = Some(AppError::Settings(error));
+                }
+                if app.agent_requested != AgentMode::Off && app.host_client.is_some() {
+                    app.start_agent(app.agent_requested);
+                }
+            }
+            #[cfg(test)]
+            if app.agent_requested != AgentMode::Off {
+                app.start_agent(app.agent_requested);
+            }
         }
 
         app
@@ -656,18 +715,92 @@ impl RavnPad {
     }
 
     fn refresh_document(&mut self) {
+        if self.host_client.is_some() {
+            let oversized =
+                self.text != self.host_synced_text && self.text.len() > large::EDIT_LIMIT as usize;
+            if oversized && !self.host_oversized {
+                self.error = Some(AppError::TooLargeToEdit);
+                let _ = self
+                    .recovery
+                    .tx
+                    .send(recovery::Command::Snapshot(Some(self.text.clone())));
+            }
+            self.host_oversized = oversized;
+            let changed =
+                !self.host_conflict_pending && !oversized && self.text != self.host_synced_text;
+            let due = std::time::Instant::now() >= self.host_poll_due;
+            if changed || due {
+                let result = if changed {
+                    self.host_client
+                        .as_mut()
+                        .unwrap()
+                        .edit(&self.text)
+                        .map(Some)
+                } else {
+                    self.host_client.as_mut().unwrap().refresh_if_changed()
+                };
+                match result {
+                    Ok(Some(state)) => {
+                        let state = state.clone();
+                        if !self.host_conflict_pending && !oversized {
+                            if self.text != state.text
+                                || self.document.identity() != &state.identity
+                            {
+                                self.apply_host_state(&state);
+                            }
+                            if !state.dirty {
+                                self.saved_text = state.text.clone();
+                            }
+                            self.host_synced_text = state.text;
+                            self.path = state.path;
+                            self.dirty = state.dirty;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if changed && error.kind() == io::ErrorKind::WouldBlock {
+                            self.preserve_local_host_text();
+                            self.resolve_host_conflict();
+                        } else if changed && error.kind() == io::ErrorKind::InvalidInput {
+                            self.error = Some(AppError::TooLargeToEdit);
+                            let _ = self
+                                .recovery
+                                .tx
+                                .send(recovery::Command::Snapshot(Some(self.text.clone())));
+                        } else {
+                            self.host_connection_failed(error, changed);
+                        }
+                    }
+                }
+                self.host_poll_due =
+                    std::time::Instant::now() + std::time::Duration::from_millis(100);
+            }
+            self.ctx.request_repaint_after(
+                self.host_poll_due
+                    .saturating_duration_since(std::time::Instant::now()),
+            );
+        }
         if !self.cache_valid {
-            self.document.observe_text(&self.text);
-            self.dirty = self.converted || self.text != self.saved_text;
-            if self.dirty {
+            if self.host_client.is_none() {
+                self.document.observe_text(&self.text);
+            }
+            if self.host_client.is_none() {
+                self.dirty = self.converted || self.text != self.saved_text;
+            }
+            if self.host_client.is_none() && self.dirty {
                 if self.recovery_due.is_none() {
                     self.recovery_due =
                         Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                     self.ctx
                         .request_repaint_after(std::time::Duration::from_secs(2));
                 }
-            } else {
+            } else if self.host_client.is_none() {
                 self.clear_recovery();
+            } else if self.host_conflict_pending {
+                let _ = self
+                    .recovery
+                    .tx
+                    .send(recovery::Command::Snapshot(Some(self.text.clone())));
             }
             self.counts = (
                 self.text.chars().count(),
@@ -681,14 +814,200 @@ impl RavnPad {
         self.cache_valid = true;
     }
 
+    fn apply_host_state(&mut self, state: &host::HostState) {
+        self.host_conflict_pending = false;
+        self.host_oversized = false;
+        if !state.read_only {
+            self.large = None;
+        }
+        self.text.clone_from(&state.text);
+        self.host_synced_text.clone_from(&state.text);
+        if !state.dirty {
+            self.saved_text.clone_from(&state.text);
+        }
+        self.path.clone_from(&state.path);
+        self.dirty = state.dirty;
+        self.document.adopt(state.identity.clone(), &state.text);
+        self.agent_mode = match state.agent_mode.as_str() {
+            "edit" => AgentMode::Edit,
+            "explore" => AgentMode::Explore,
+            _ => AgentMode::Off,
+        };
+        self.cache_valid = false;
+        self.spell_dirty = true;
+    }
+
+    fn preserve_local_host_text(&mut self) {
+        self.host_conflict_pending = true;
+        let _ = self
+            .recovery
+            .tx
+            .send(recovery::Command::Snapshot(Some(self.text.clone())));
+    }
+
+    fn host_connection_failed(&mut self, error: io::Error, local_edit: bool) {
+        if local_edit || self.is_dirty() {
+            self.preserve_local_host_text();
+        }
+        if let Some(client) = self.host_client.take() {
+            client.abandon();
+        }
+        self.agent_mode = AgentMode::Off;
+        self.host_oversized = false;
+        self.cache_valid = false;
+        self.error = Some(AppError::Settings(error));
+    }
+
+    /// A stale edit must never replace text that has only been typed locally.
+    /// The user explicitly chooses which buffer wins before sending another edit.
+    fn resolve_host_conflict(&mut self) -> bool {
+        let Some(client) = self.host_client.as_mut() else {
+            return false;
+        };
+        let remote = match client.refresh() {
+            Ok(state) => state.clone(),
+            Err(error) => {
+                self.error = Some(AppError::Settings(error));
+                return false;
+            }
+        };
+        match native_dialog::unsaved(
+            "Document changed",
+            "The host changed while you were editing. Choose which text to keep.",
+            "Keep my edits",
+            "Use host text",
+            "Decide later",
+        ) {
+            native_dialog::Confirm::Save => {
+                let result = self.host_client.as_mut().unwrap().edit(&self.text);
+                match result {
+                    Ok(state) => {
+                        let state = state.clone();
+                        self.apply_host_state(&state);
+                        let _ = self.recovery.tx.send(recovery::Command::Snapshot(None));
+                        true
+                    }
+                    Err(error) => {
+                        self.error = Some(AppError::Settings(error));
+                        false
+                    }
+                }
+            }
+            native_dialog::Confirm::Discard => {
+                self.apply_host_state(&remote);
+                let _ = self.recovery.tx.send(recovery::Command::Snapshot(None));
+                true
+            }
+            native_dialog::Confirm::Cancel => false,
+        }
+    }
+
+    fn connect_host(&mut self, instance: &str) -> io::Result<()> {
+        let client = host::Client::connect(instance)?;
+        let state = client.state.clone();
+        let view = self.host_read_only_view(&state)?;
+        self.host_client = Some(client);
+        self.apply_host_state(&state);
+        self.large = view;
+        self.document_generation += 1;
+        Ok(())
+    }
+
+    fn host_read_only_view(&self, state: &host::HostState) -> io::Result<Option<large::LargeView>> {
+        if !state.read_only {
+            return Ok(None);
+        }
+        let path = state
+            .path
+            .as_deref()
+            .ok_or_else(|| io::Error::other("read-only host has no file path"))?;
+        let mut view = large::LargeView::reopen(path)?;
+        let (_, offset) = self.prefs.position(path);
+        view.set_offset(offset);
+        Ok(Some(view))
+    }
+
+    fn spawn_host(&mut self, path: Option<&Path>) -> io::Result<()> {
+        // The previous document keeps running in its own host. Clear its GUI
+        // attachment before any failure can leave this buffer tied to it.
+        self.host_client.take();
+        self.host_synced_text.clear();
+        self.host_conflict_pending = false;
+        self.host_oversized = false;
+        self.agent_mode = AgentMode::Off;
+        let client = host::Client::spawn(path, host::AgentMode::Off)?;
+        let state = client.state.clone();
+        self.host_client = Some(client);
+        self.apply_host_state(&state);
+        self.document_generation += 1;
+        Ok(())
+    }
+
+    fn seed_host_text(&mut self, text: &str) {
+        let result = self
+            .host_client
+            .as_mut()
+            .map(|client| client.edit(text).map(|state| state.clone()));
+        match result {
+            Some(Ok(state)) => self.apply_host_state(&state),
+            Some(Err(error)) => {
+                self.text = text.to_owned();
+                self.host_connection_failed(error, true);
+            }
+            None => {
+                self.text = text.to_owned();
+                self.preserve_local_host_text();
+                self.cache_valid = false;
+            }
+        }
+    }
+
+    fn host_history(&mut self, undo: bool) {
+        if self.host_conflict_pending && !self.resolve_host_conflict() {
+            return;
+        }
+        let Some(client) = self.host_client.as_mut() else {
+            return;
+        };
+        let result = (|| -> io::Result<host::HostState> {
+            if client.state.text != self.text {
+                client.edit(&self.text)?;
+            }
+            if undo {
+                client.undo()?;
+            } else {
+                client.redo()?;
+            }
+            Ok(client.state.clone())
+        })();
+        match result {
+            Ok(state) => self.apply_host_state(&state),
+            Err(error) => self.error = Some(AppError::Settings(error)),
+        }
+    }
+
     fn start_agent(&mut self, mode: AgentMode) {
         debug_assert!(mode != AgentMode::Off);
         self.agent_requested = AgentMode::Off;
+        if self.host_client.is_some() {
+            self.set_agent_mode(mode);
+            return;
+        }
+        if !cfg!(test) {
+            self.error = Some(AppError::Settings(io::Error::other(
+                "document host unavailable",
+            )));
+            return;
+        }
         if self.agent.is_some() {
             self.set_agent_mode(mode);
             return;
         }
-        match agent::Server::start(&self.document.identity().instance_id, self.ctx.clone()) {
+        let ctx = self.ctx.clone();
+        match agent::Server::start(
+            &self.document.identity().instance_id,
+            std::sync::Arc::new(move || ctx.request_repaint()),
+        ) {
             Ok(server) => {
                 self.agent = Some(server);
                 self.agent_mode = mode;
@@ -699,6 +1018,21 @@ impl RavnPad {
 
     fn set_agent_mode(&mut self, mode: AgentMode) {
         if mode == self.agent_mode {
+            return;
+        }
+        if let Some(client) = self.host_client.as_mut() {
+            let host_mode = match mode {
+                AgentMode::Off => host::AgentMode::Off,
+                AgentMode::Explore => host::AgentMode::Explore,
+                AgentMode::Edit => host::AgentMode::Edit,
+            };
+            match client.set_mode(host_mode) {
+                Ok(()) => {
+                    self.agent_mode = mode;
+                    self.agent_requested = AgentMode::Off;
+                }
+                Err(error) => self.error = Some(AppError::Settings(error)),
+            }
             return;
         }
         if mode == AgentMode::Off {
@@ -756,8 +1090,10 @@ impl RavnPad {
             (false, AgentMode::Off) => "OFF — this window does not expose a document endpoint",
         };
         let commands = format!(
-            "\"{cli}\" document status --instance {} --json\n\"{cli}\" document read --instance {} --document {} --json\n\"{cli}\" document propose --instance {} --document {} --stdin --json",
+            "\"{cli}\" document status --instance {} --json\n\"{cli}\" document read --instance {} --document {} --json\n\"{cli}\" document propose --instance {} --document {} --stdin --json\n\"{cli}\" document save --instance {} --document {} --json",
             identity.instance_id,
+            identity.instance_id,
+            identity.document_id,
             identity.instance_id,
             identity.document_id,
             identity.instance_id,
@@ -765,12 +1101,12 @@ impl RavnPad {
         );
         if norwegian {
             format!(
-                "Status: {state}\n\nBruk Agent → Utforsk for lesetilgang, Agent → Rediger for å gi endringstilgang, og Agent → Av for å trekke tilbake all tilgang. Agenten kan ikke endre modus selv.\n\nSlik finner agenten vinduet\nRavnPad skriver en eierbeskyttet endpoint-fil i:\n{directory}\n\nFilnavnet er instance-ID-en. Agenten finner filen lokalt og bruker deretter document status for å få ID-en til dokumentet som er åpent nå.\n\nInstance-ID:\n{}\n\nGjeldende document-ID:\n{}\n\nCLI-eksempel\n{commands}\n\nForslaget til den siste kommandoen sendes som patch-JSON på stdin og krever Rediger-modus. MCP-klienter kan starte:\n\"{mcp}\"\nDette tilbyr de samme status-, read- og propose-operasjonene over stdio.\n\nBare lokale prosesser under din brukerkonto får tilgang. Når agenttilgangen slås av eller RavnPad lukkes, fjernes endpointen. Når et annet dokument åpnes, blir denne document-ID-en ugyldig.",
+                "Status: {state}\n\nBruk Agent → Utforsk for lesetilgang, Agent → Rediger for å gi endringstilgang, og Agent → Av for å trekke tilbake all tilgang. Agenten kan ikke endre modus selv.\n\nSlik finner agenten vinduet\nRavnPad skriver en eierbeskyttet endpoint-fil i:\n{directory}\n\nFilnavnet er instance-ID-en. Agenten finner filen lokalt og bruker deretter document status for å få ID-en til dokumentet som er åpent nå.\n\nInstance-ID:\n{}\n\nGjeldende document-ID:\n{}\n\nCLI-eksempel\n{commands}\n\nForslaget til document propose sendes som patch-JSON på stdin. Propose og save krever Rediger-modus. MCP-klienter kan starte:\n\"{mcp}\"\nDette tilbyr status, read, propose og save over stdio.\n\nBare lokale prosesser under din brukerkonto får tilgang. Når agenttilgangen slås av, fjernes endpointen. Verten fortsetter etter at vinduet lukkes, til eksplisitt stopp.",
                 identity.instance_id, identity.document_id,
             )
         } else {
             format!(
-                "Status: {state}\n\nUse Agent → Explore for read access, Agent → Edit to grant change access, and Agent → Off to revoke all access. The agent cannot change this mode itself.\n\nHow an agent finds this window\nRavnPad writes an owner-only endpoint file in:\n{directory}\n\nThe filename is the instance ID. The agent discovers it locally, then uses document status to resolve the ID of the document that is open now.\n\nInstance ID:\n{}\n\nCurrent document ID:\n{}\n\nCLI example\n{commands}\n\nThe final command receives the proposed patch JSON on stdin and requires Edit mode. MCP clients can start:\n\"{mcp}\"\nThis exposes the same status, read, and propose operations over stdio.\n\nOnly local processes running as your user can connect. Turning agent access off or closing RavnPad removes the endpoint. Opening another document invalidates this document ID.",
+                "Status: {state}\n\nUse Agent → Explore for read access, Agent → Edit to grant change access, and Agent → Off to revoke all access. The agent cannot change this mode itself.\n\nHow an agent finds this window\nRavnPad writes an owner-only endpoint file in:\n{directory}\n\nThe filename is the instance ID. The agent discovers it locally, then uses document status to resolve the ID of the document that is open now.\n\nInstance ID:\n{}\n\nCurrent document ID:\n{}\n\nCLI example\n{commands}\n\nDocument propose receives patch JSON on stdin. Propose and save require Edit mode. MCP clients can start:\n\"{mcp}\"\nThis exposes status, read, propose, and save over stdio.\n\nOnly local processes running as your user can connect. Turning agent access off removes the endpoint. The host continues after the window closes until explicitly stopped.",
                 identity.instance_id, identity.document_id,
             )
         }
@@ -1005,6 +1341,12 @@ impl RavnPad {
                         }),
                     }
                 }
+                _ => request.respond(agent::Response::Error {
+                    error: agent::ApiError::new(
+                        "unsupported",
+                        "host command unavailable in legacy GUI",
+                    ),
+                }),
             }
             if applied_proposal.is_some() {
                 break;
@@ -1029,7 +1371,11 @@ impl RavnPad {
     #[cfg(any(target_os = "macos", windows))]
     fn native_uses_crlf(&self) -> bool {
         if self.path.is_some() {
-            self.saved_text.contains("\r\n")
+            if self.host_client.is_some() {
+                self.text.contains("\r\n")
+            } else {
+                self.saved_text.contains("\r\n")
+            }
         } else {
             self.text.contains("\r\n")
         }
@@ -1041,6 +1387,8 @@ impl RavnPad {
 
     fn is_dirty(&self) -> bool {
         self.dirty
+            || self.host_conflict_pending
+            || (self.host_client.is_some() && self.text != self.host_synced_text)
     }
 
     fn display_name(&self) -> String {
@@ -1067,6 +1415,9 @@ impl RavnPad {
                 | Action::OpenBytes(_)
                 | Action::InstallUpdate { .. }
         ) && self.is_dirty()
+            && !(matches!(action, Action::Quit)
+                && self.host_client.is_some()
+                && !self.host_conflict_pending)
         {
             self.confirm = Some(action);
             return;
@@ -1091,6 +1442,10 @@ impl RavnPad {
                 self.restore_editor_scroll = true;
                 self.spell_dirty = true;
                 self.cache_valid = false;
+                #[cfg(not(test))]
+                if let Err(error) = self.spawn_host(None) {
+                    self.error = Some(AppError::Settings(error));
+                }
             }
             Action::NewWindow => match std::env::current_exe()
                 .and_then(|exe| std::process::Command::new(exe).spawn())
@@ -1129,6 +1484,32 @@ impl RavnPad {
             }
             Action::Recover(path) => {
                 self.remember_position_and_save();
+                #[cfg(not(test))]
+                if self.host_client.is_some() {
+                    if let Err(error) = self.spawn_host(None) {
+                        self.error = Some(AppError::Settings(error));
+                        return;
+                    }
+                    let result = self
+                        .host_client
+                        .as_mut()
+                        .unwrap()
+                        .recover(&path)
+                        .map(Clone::clone);
+                    match result {
+                        Ok(state) => {
+                            self.apply_host_state(&state);
+                            self.large = None;
+                            self.converted = false;
+                            self.suggested_path = None;
+                            self.recovery_candidates.clear();
+                            self.editor_scroll_y = 0.0;
+                            self.restore_editor_scroll = true;
+                        }
+                        Err(error) => self.error = Some(AppError::Settings(error)),
+                    }
+                    return;
+                }
                 self.file_busy = true;
                 if self
                     .recovery
@@ -1154,6 +1535,14 @@ impl RavnPad {
                 self.restore_editor_scroll = true;
                 self.spell_dirty = true;
                 self.cache_valid = false;
+                #[cfg(not(test))]
+                {
+                    let text = self.text.clone();
+                    if let Err(error) = self.spawn_host(None) {
+                        self.error = Some(AppError::Settings(error));
+                    }
+                    self.seed_host_text(&text);
+                }
             }
             Action::CheckUpdate => {
                 if matches!(self.update, UpdateUi::Downloading) {
@@ -1401,11 +1790,16 @@ impl RavnPad {
     }
 
     fn start_save(&mut self) -> bool {
+        if !cfg!(test) && self.host_client.is_none() {
+            self.error = Some(AppError::Save(io::Error::other(
+                "document host unavailable",
+            )));
+            return false;
+        }
         let Some(path) = self.pick_save_path() else {
             return false;
         };
-        self.begin_save(path);
-        true
+        self.begin_save(path)
     }
 
     fn pick_open_path(&self) -> Option<PathBuf> {
@@ -1500,8 +1894,19 @@ impl RavnPad {
         }
         if opened {
             self.record_recent(&recent_path);
+            #[cfg(not(test))]
+            {
+                let host_path = self.path.clone();
+                let seed_text = self.text.clone();
+                if let Err(error) = self.spawn_host(host_path.as_deref()) {
+                    self.error = Some(AppError::Settings(error));
+                }
+                if host_path.is_none() {
+                    self.seed_host_text(&seed_text);
+                }
+            }
         }
-        if self.agent_requested != AgentMode::Off {
+        if self.agent_requested != AgentMode::Off && self.host_client.is_some() {
             self.start_agent(self.agent_requested);
         }
         self.spell_dirty = true;
@@ -1509,6 +1914,12 @@ impl RavnPad {
     }
 
     fn write_current(&mut self) -> bool {
+        if !cfg!(test) && self.host_client.is_none() {
+            self.error = Some(AppError::Save(io::Error::other(
+                "document host unavailable",
+            )));
+            return false;
+        }
         if self.large.is_some() {
             self.error = Some(AppError::TooLargeToEdit);
             return false;
@@ -1516,11 +1927,47 @@ impl RavnPad {
         let Some(path) = &self.path else {
             return false;
         };
-        self.begin_save(path.clone());
-        true
+        self.begin_save(path.clone())
     }
 
-    fn begin_save(&mut self, path: PathBuf) {
+    fn begin_save(&mut self, path: PathBuf) -> bool {
+        if self.host_conflict_pending && !self.resolve_host_conflict() {
+            return false;
+        }
+        if let Some(client) = self.host_client.as_mut() {
+            if self.text.len() > large::EDIT_LIMIT as usize {
+                self.error = Some(AppError::TooLargeToEdit);
+                return false;
+            }
+            self.file_busy = true;
+            let text = self.text.clone();
+            if client.state.text != self.text
+                && let Err(error) = client.edit(&self.text)
+            {
+                self.file_busy = false;
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    self.preserve_local_host_text();
+                    if self.resolve_host_conflict() {
+                        return self.begin_save(path);
+                    }
+                } else {
+                    self.host_connection_failed(error, true);
+                }
+                return false;
+            }
+            let save_as = (client.state.path.as_ref() != Some(&path)).then(|| path.clone());
+            let job = client.save_job(save_as);
+            let tx = self.file_tx.clone();
+            let ctx = self.ctx.clone();
+            thread::spawn(move || {
+                let result = job().map(|warning| storage::SaveOutcome {
+                    durability_warning: warning.map(io::Error::other),
+                });
+                let _ = tx.send(FileEvent::Save(path, text, result));
+                ctx.request_repaint();
+            });
+            return true;
+        }
         self.file_busy = true;
         let text = self.text.clone();
         let expected = if self.path.as_ref() == Some(&path) {
@@ -1539,6 +1986,7 @@ impl RavnPad {
             let _ = tx.send(FileEvent::Save(path, text, result));
             ctx.request_repaint();
         });
+        true
     }
 
     fn clear_recovery(&mut self) {
@@ -1567,6 +2015,14 @@ impl RavnPad {
                     self.cache_valid = false;
                     self.spell_dirty = true;
                     self.recovery_candidates.clear();
+                    #[cfg(not(test))]
+                    {
+                        let text = self.text.clone();
+                        if let Err(error) = self.spawn_host(None) {
+                            self.error = Some(AppError::Settings(error));
+                        }
+                        self.seed_host_text(&text);
+                    }
                 }
                 recovery::Event::Failed(e) => self.error = Some(AppError::Settings(e)),
                 recovery::Event::ReadFailed(e) => {
@@ -1604,6 +2060,9 @@ impl RavnPad {
                         self.saved_text = text;
                         self.cache_valid = false;
                         self.refresh_document();
+                        if self.host_client.is_some() {
+                            self.clear_recovery();
+                        }
                         if let Some(warning) = outcome.durability_warning {
                             self.after_save = None;
                             self.error = Some(AppError::Durability(warning));
@@ -1628,6 +2087,14 @@ impl RavnPad {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) -> Option<Action> {
+        if self.host_client.is_some() && ctx.input_mut(|input| input.consume_shortcut(&UNDO)) {
+            self.host_history(true);
+            return None;
+        }
+        if self.host_client.is_some() && ctx.input_mut(|input| input.consume_shortcut(&REDO)) {
+            self.host_history(false);
+            return None;
+        }
         self.select_all(ctx);
         if self.large.is_none()
             && !self.settings_open
@@ -1769,7 +2236,9 @@ impl eframe::App for RavnPad {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_recovery();
         self.poll_files();
-        self.refresh_document();
+        if !self.file_busy {
+            self.refresh_document();
+        }
         if let Some(proposal) = self.poll_agent(true) {
             Self::remap_editor_selection(ctx, &proposal);
         }
@@ -2117,7 +2586,7 @@ impl eframe::App for RavnPad {
                         })
                         .desired_rows(min_rows)
                         .lock_focus(!dialog_busy)
-                        .interactive(!dialog_busy)
+                        .interactive(!dialog_busy && (cfg!(test) || self.host_client.is_some()))
                         .show(ui);
                     if output.response.changed() {
                         self.cache_valid = false;
@@ -2281,6 +2750,7 @@ impl eframe::App for RavnPad {
 
         if ctx.input(|input| input.viewport().close_requested())
             && self.is_dirty()
+            && (self.host_client.is_none() || self.host_conflict_pending)
             && !self.restarting
         {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -2290,7 +2760,9 @@ impl eframe::App for RavnPad {
         }
 
         if let Some(action) = action {
-            if matches!(action, Action::Quit) && !self.is_dirty() {
+            if matches!(action, Action::Quit)
+                && (!self.is_dirty() || (self.host_client.is_some() && !self.host_conflict_pending))
+            {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             } else if matches!(action, Action::Quit) {
                 self.request(Action::Quit);
@@ -2307,6 +2779,23 @@ impl eframe::App for RavnPad {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.host_client.is_some() && self.text != self.host_synced_text {
+            let sent = self.text.len() <= large::EDIT_LIMIT as usize
+                && self
+                    .host_client
+                    .as_mut()
+                    .is_some_and(|client| client.edit(&self.text).is_ok());
+            if !sent {
+                let _ = self
+                    .recovery
+                    .tx
+                    .send(recovery::Command::Snapshot(Some(self.text.clone())));
+            }
+        }
+        if let Some(mut client) = self.host_client.take() {
+            let _ = client.detach();
+        }
+        self.recovery.finish();
         self.remember_position_and_save();
     }
 }
@@ -2504,7 +2993,7 @@ fn load_text(path: &std::path::Path) -> Result<String, String> {
 }
 
 fn save_text(path: &Path, text: &str) -> Result<storage::SaveOutcome, io::Error> {
-    storage::save(path, text.as_bytes())
+    storage::save_checked(path, text.as_bytes(), None)
 }
 
 fn dialog_max_size(ctx: &egui::Context) -> egui::Vec2 {
@@ -2555,6 +3044,72 @@ fn avoid_broken_fullscreen(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnect_restores_large_read_only_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(&dir.path().join("recovery"));
+        let path = dir.path().join("large.txt");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(large::EDIT_LIMIT + 1).unwrap();
+        let state = host::HostState {
+            identity: document::Document::new("", 1).identity().clone(),
+            text: String::new(),
+            path: Some(path.clone()),
+            dirty: false,
+            undo_depth: 0,
+            redo_depth: 0,
+            agent_mode: "off".into(),
+            read_only: true,
+        };
+        let view = app.host_read_only_view(&state).unwrap().unwrap();
+        assert_eq!(view.path, path);
+        assert_eq!(view.size, large::EDIT_LIMIT + 1);
+    }
+
+    #[test]
+    fn lost_host_transport_keeps_local_text_in_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_dir = dir.path().join("recovery");
+        let mut app = test_app(&recovery_dir);
+        app.text = "unsent local edit".into();
+        app.host_connection_failed(io::Error::from(io::ErrorKind::BrokenPipe), true);
+        assert_eq!(app.text, "unsent local edit");
+        assert!(app.host_client.is_none());
+        assert!(app.is_dirty());
+        app.recovery.finish();
+        let copies = std::fs::read_dir(&recovery_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&copies[0]).unwrap(),
+            "unsent local edit"
+        );
+    }
+
+    #[test]
+    fn failed_first_host_seed_keeps_original_text_in_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_dir = dir.path().join("recovery");
+        let mut app = test_app(&recovery_dir);
+        app.seed_host_text("dropped document");
+        assert_eq!(app.text, "dropped document");
+        assert!(app.is_dirty());
+        app.recovery.finish();
+        let copies = std::fs::read_dir(&recovery_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&copies[0]).unwrap(),
+            "dropped document"
+        );
+    }
 
     #[test]
     fn missing_startup_document_is_reported_in_every_agent_mode() {
@@ -2618,13 +3173,18 @@ mod tests {
             file_rx,
             file_busy: false,
             after_save: None,
-            recovery: recovery::Recovery::start_in(ctx.clone(), Some(dir.to_owned())),
+            recovery: recovery::Recovery::start_in(Some(dir.to_owned())),
             recovery_candidates: Vec::new(),
             recovery_due: None,
             recovered_from: None,
             ctx: ctx.clone(),
             document_generation: 0,
             document: document::Document::new("", large::EDIT_LIMIT as usize),
+            host_client: None,
+            host_synced_text: String::new(),
+            host_conflict_pending: false,
+            host_oversized: false,
+            host_poll_due: std::time::Instant::now(),
             agent: None,
             agent_mode: AgentMode::Off,
             agent_requested: AgentMode::Off,

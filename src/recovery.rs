@@ -2,14 +2,19 @@ use std::{
     fs::{self, OpenOptions},
     io,
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
+    time::Duration,
 };
 
 use fs2::FileExt as _;
 
 pub enum Command {
     Snapshot(Option<String>),
+    SnapshotChecked(String, Sender<io::Result<()>>),
     Read(PathBuf),
     Delete(PathBuf),
     Stop,
@@ -32,11 +37,19 @@ pub struct Recovery {
 }
 
 impl Recovery {
-    pub fn start(ctx: eframe::egui::Context) -> Self {
-        Self::start_in(ctx, crate::prefs::config_dir().map(|p| p.join("recovery")))
+    pub fn start() -> Self {
+        Self::start_with_wake(Arc::new(|| {}))
     }
 
-    pub(crate) fn start_in(ctx: eframe::egui::Context, dir: Option<PathBuf>) -> Self {
+    pub fn start_with_wake(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self::start_in_with_wake(crate::prefs::config_dir().map(|p| p.join("recovery")), wake)
+    }
+
+    pub(crate) fn start_in(dir: Option<PathBuf>) -> Self {
+        Self::start_in_with_wake(dir, Arc::new(|| {}))
+    }
+
+    fn start_in_with_wake(dir: Option<PathBuf>, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -45,7 +58,7 @@ impl Recovery {
             };
             if let Err(error) = fs::create_dir_all(&dir) {
                 let _ = events.send(Event::Failed(error));
-                ctx.request_repaint();
+                wake();
                 return;
             }
             let unique = std::time::SystemTime::now()
@@ -68,7 +81,7 @@ impl Recovery {
                 Ok(lock) => lock,
                 Err(error) => {
                     let _ = events.send(Event::Failed(error));
-                    ctx.request_repaint();
+                    wake();
                     return;
                 }
             };
@@ -107,11 +120,16 @@ impl Recovery {
                 Err(e) => Event::Failed(e),
             };
             let _ = events.send(event);
-            ctx.request_repaint();
+            wake();
             while let Ok(command) = commands.recv() {
                 let result = match command {
                     Command::Snapshot(Some(text)) => {
                         crate::storage::save(&path, text.as_bytes()).map(|_| None)
+                    }
+                    Command::SnapshotChecked(text, reply) => {
+                        let result = crate::storage::save(&path, text.as_bytes()).map(|_| ());
+                        let _ = reply.send(result);
+                        Ok(None)
                     }
                     Command::Snapshot(None) => remove(&path).map(|_| None),
                     Command::Read(path) => Ok(Some(match fs::read_to_string(&path) {
@@ -124,11 +142,11 @@ impl Recovery {
                 match result {
                     Ok(Some(event)) => {
                         let _ = events.send(event);
-                        ctx.request_repaint();
+                        wake();
                     }
                     Err(e) => {
                         let _ = events.send(Event::Failed(e));
-                        ctx.request_repaint();
+                        wake();
                     }
                     _ => {}
                 }
@@ -178,6 +196,16 @@ fn remove(path: &std::path::Path) -> io::Result<()> {
 }
 
 impl Recovery {
+    pub fn snapshot_checked(&self, text: String) -> io::Result<()> {
+        let (reply, result) = mpsc::channel();
+        self.tx
+            .send(Command::SnapshotChecked(text, reply))
+            .map_err(|_| io::Error::other("recovery worker unavailable"))?;
+        result
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| io::Error::other("recovery snapshot not confirmed"))?
+    }
+
     pub fn finish(&mut self) {
         // Cocoa termination may exit before Rust destructors run.
         let _ = self.tx.send(Command::Stop);
@@ -195,6 +223,34 @@ impl Drop for Recovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_wakes_gui_recovery_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let worker = Recovery::start_in_with_wake(
+            Some(dir.path().to_owned()),
+            Arc::new(move || {
+                let _ = wake_tx.send(());
+            }),
+        );
+        assert!(matches!(
+            worker.rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::Available(_)
+        ));
+        wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        worker
+            .tx
+            .send(Command::Read(dir.path().join("missing.txt")))
+            .unwrap();
+        assert!(matches!(
+            worker.rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::ReadFailed(_)
+        ));
+        wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
     fn available(worker: &Recovery) -> Vec<PathBuf> {
         match worker
             .rx
@@ -208,16 +264,16 @@ mod tests {
     #[test]
     fn snapshot_survives_restart_and_restores_exact_unicode() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = eframe::egui::Context::default();
+
         {
-            let worker = Recovery::start_in(ctx.clone(), Some(dir.path().to_owned()));
+            let worker = Recovery::start_in(Some(dir.path().to_owned()));
             assert!(available(&worker).is_empty());
             worker
                 .tx
                 .send(Command::Snapshot(Some("æøå\nunsaved".into())))
                 .unwrap();
         }
-        let worker = Recovery::start_in(ctx, Some(dir.path().to_owned()));
+        let worker = Recovery::start_in(Some(dir.path().to_owned()));
         let paths = available(&worker);
         assert_eq!(paths.len(), 1);
         worker.tx.send(Command::Read(paths[0].clone())).unwrap();
@@ -234,10 +290,7 @@ mod tests {
     #[test]
     fn snapshots_from_a_live_window_are_not_offered() {
         let dir = tempfile::tempdir().unwrap();
-        let live = Recovery::start_in(
-            eframe::egui::Context::default(),
-            Some(dir.path().to_owned()),
-        );
+        let live = Recovery::start_in(Some(dir.path().to_owned()));
         assert!(available(&live).is_empty());
         live.tx
             .send(Command::Snapshot(Some("still being edited".into())))
@@ -252,20 +305,14 @@ mod tests {
             }
             thread::sleep(std::time::Duration::from_millis(10));
         }
-        let worker = Recovery::start_in(
-            eframe::egui::Context::default(),
-            Some(dir.path().to_owned()),
-        );
+        let worker = Recovery::start_in(Some(dir.path().to_owned()));
         assert!(available(&worker).is_empty());
     }
     #[test]
     fn cleanup_is_ordered_after_pending_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let worker = Recovery::start_in(
-                eframe::egui::Context::default(),
-                Some(dir.path().to_owned()),
-            );
+            let worker = Recovery::start_in(Some(dir.path().to_owned()));
             available(&worker);
             worker
                 .tx

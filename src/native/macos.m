@@ -93,8 +93,8 @@ void rp_rebuild_menus(void) {
     command(file, RP_SAVE_AS, @"S"); command(file, RP_RECOVERY, @"");
     item(file, L(RP_CLOSE), @selector(performClose:), @"w", nil, 0);
     NSMenu *edit = submenu(bar, L(RP_EDIT));
-    item(edit,L(RP_UNDO),@selector(undo:),@"z",nil,0);
-    item(edit,L(RP_REDO),@selector(redo:),@"Z",nil,0);
+    command(edit,RP_UNDO,@"z");
+    command(edit,RP_REDO,@"Z");
     [edit addItem:NSMenuItem.separatorItem];
     item(edit,L(RP_CUT),@selector(cut:),@"x",nil,0);
     item(edit,L(RP_COPY),@selector(copy:),@"c",nil,0);

@@ -85,6 +85,12 @@ fn tools() -> Vec<Value> {
             }), &["instance_id","document_id","operation_id","base_revision","base_hash","edits"]),
             "annotations": {"readOnlyHint": false, "destructiveHint": true}
         }),
+        json!({
+            "name": "ravnpad_document_save",
+            "description": "Save the current buffer to its existing path after conflict checking. A pathless document needs Save As in the GUI first.",
+            "inputSchema": object_schema(json!({"instance_id":{"type":"string"},"document_id":{"type":"string"}}), &["instance_id","document_id"]),
+            "annotations": {"readOnlyHint": false, "destructiveHint": true}
+        }),
     ]
 }
 
@@ -159,6 +165,18 @@ fn execute_tool(name: &str, arguments: &Value) -> Result<Value, String> {
                 Some(patch.to_string().as_bytes()),
             )
         }
+        "ravnpad_document_save" => run_cli(
+            &[
+                "document",
+                "save",
+                "--instance",
+                string(&arguments, "instance_id")?,
+                "--document",
+                string(&arguments, "document_id")?,
+                "--json",
+            ],
+            None,
+        ),
         _ => return Err(format!("unknown tool: {name}")),
     };
     result
