@@ -2780,7 +2780,10 @@ impl eframe::App for RavnPad {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if self.host_client.is_some() && self.text != self.host_synced_text {
-            let sent = self.text.len() <= large::EDIT_LIMIT as usize
+            // A deferred conflict may already have refreshed the client's base
+            // revision. Keep local text in recovery until the user resolves it.
+            let sent = !self.host_conflict_pending
+                && self.text.len() <= large::EDIT_LIMIT as usize
                 && self
                     .host_client
                     .as_mut()
