@@ -1332,8 +1332,42 @@ fn exchange_bytes(address: &str, bytes: &[u8], _timeout: Duration) -> io::Result
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn attached_client(directory: &std::path::Path) -> (Client, Core, agent::Server) {
+        let mut core = Core::new(None, AgentMode::Edit).unwrap();
+        core.recovery.finish();
+        core.recovery = recovery::Recovery::start_in(Some(directory.join("host-recovery")));
+        let instance = core.state().identity.instance_id;
+        let server =
+            agent::Server::start_in(&instance, directory.join("host"), Arc::new(|| {})).unwrap();
+        let agent::Response::Gui {
+            state,
+            session: Some(session),
+        } = core.handle(
+            agent::Request::GuiAttach {
+                token: server.token().into(),
+                liveness: None,
+            },
+            server.token(),
+            "agent",
+        ) else {
+            panic!("test GUI should attach");
+        };
+        let client = Client {
+            endpoint: agent::Endpoint {
+                protocol_version: document::PROTOCOL_VERSION,
+                instance_id: instance.clone(),
+                address: server.address().into(),
+                token: server.token().into(),
+            },
+            session,
+            _liveness: GuiLiveness::new(&directory.join("host/instance.json"), &instance).unwrap(),
+            state,
+        };
+        (client, core, server)
+    }
 
     #[test]
     fn empty_recovery_remains_unsaved_until_saved() {

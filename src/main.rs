@@ -3046,6 +3046,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn deferred_host_conflict_then_discard_and_exit_preserves_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_dir = dir.path().join("recovery");
+        let mut app = test_app(&recovery_dir);
+        let (client, mut core, server) = host::tests::attached_client(dir.path());
+        app.apply_host_state(&client.state);
+        app.host_client = Some(client);
+        app.text = "unsent local edit".into();
+
+        // The agent changes the host after the GUI's last synchronized revision.
+        let state = core.state();
+        let patch = serde_json::from_value(serde_json::json!({
+            "operation_id": "remote-edit",
+            "document_id": state.identity.document_id,
+            "base_revision": state.identity.revision,
+            "base_hash": document::hash(&state.text),
+            "edits": [{"start_byte": 0, "end_byte": 0,
+                       "expected_text": "", "replacement": "newer agent text"}]
+        }))
+        .unwrap();
+        assert!(matches!(
+            core.handle(
+                agent::Request::DocumentPropose {
+                    token: "agent".into(),
+                    patch,
+                },
+                server.token(),
+                "agent",
+            ),
+            agent::Response::Applied { .. }
+        ));
+        let expected = core.state();
+
+        // Use the real IPC client and host handler, without a native dialog.
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            while matches!(stop_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                if let Ok(request) = server.recv_timeout(std::time::Duration::from_millis(20)) {
+                    let response = core.handle(request.request.clone(), server.token(), "agent");
+                    request.respond(response);
+                }
+            }
+            core.state()
+        });
+        let error = app
+            .host_client
+            .as_mut()
+            .unwrap()
+            .edit(&app.text)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        app.preserve_local_host_text();
+        let refreshed = app.host_client.as_mut().unwrap().refresh().unwrap();
+        assert_eq!(refreshed.identity, expected.identity);
+        assert!(app.host_conflict_pending);
+        assert_eq!(app.text, "unsent local edit");
+
+        // "Decide later" leaves both buffers intact. "Don't Save" on Quit
+        // clears GUI recovery and dirty state before eframe invokes on_exit.
+        app.clear_recovery();
+        app.saved_text.clone_from(&app.text);
+        app.dirty = false;
+        eframe::App::on_exit(&mut app, None);
+        assert!(app.host_client.is_none());
+        drop(stop_tx);
+        let actual = worker.join().unwrap();
+        assert_eq!(actual.text, expected.text);
+        assert_eq!(actual.identity, expected.identity);
+        assert_eq!(actual.undo_depth, expected.undo_depth);
+        assert_eq!(actual.dirty, expected.dirty);
+
+        let copies = std::fs::read_dir(&recovery_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&copies[0]).unwrap(),
+            "unsent local edit"
+        );
+    }
+
+    #[test]
     fn reconnect_restores_large_read_only_view() {
         let dir = tempfile::tempdir().unwrap();
         let app = test_app(&dir.path().join("recovery"));
